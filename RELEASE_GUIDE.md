@@ -40,11 +40,14 @@ This release uses the Windows `PyInstaller one-folder` portable packaging mode.
 - Clean release virtual environment dependency installation
 - PyInstaller portable build
 - `YunFengEditor.exe --worker --help` smoke check
+- `YunFengEditor.exe --worker --preflight` runtime self-check
 - GUI startup 8-second smoke check
+- Auto-generated sample media and one real draft generation smoke run
 - Required packaged resource existence check
 
 ## 6. Notes
 
 - Do not move files out of `_internal/`
 - Do not distribute only the single exe file
+- API Key is no longer hardcoded; enter it once in the UI and it will be saved locally in `output/ui_settings.json`
 - If repackaging is needed, run `build_release.ps1`

@@ -5,15 +5,59 @@ import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
+from app_paths import runtime_path
 
-def get_draft_root() -> str:
+
+def get_official_draft_root() -> str:
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_appdata:
+        return ""
     return os.path.join(
-        os.environ.get("LOCALAPPDATA", ""),
+        local_appdata,
         "JianyingPro",
         "User Data",
         "Projects",
         "com.lveditor.draft",
     )
+
+
+def get_portable_draft_root() -> str:
+    return runtime_path("_sandbox_drafts", "JianyingPro", "User Data", "Projects", "com.lveditor.draft")
+
+
+def is_portable_draft_root(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    try:
+        return os.path.abspath(path) == os.path.abspath(get_portable_draft_root())
+    except Exception:
+        return False
+
+
+def _ensure_writable_directory(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe_path = os.path.join(path, ".write_probe.tmp")
+        with open(probe_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe_path)
+        return True
+    except OSError:
+        return False
+
+
+def get_draft_root() -> str:
+    override_root = os.environ.get("OTC_DRAFT_ROOT", "").strip()
+    if override_root:
+        return override_root
+
+    official_root = get_official_draft_root()
+    if official_root and _ensure_writable_directory(official_root):
+        return official_root
+
+    portable_root = get_portable_draft_root()
+    os.makedirs(portable_root, exist_ok=True)
+    return portable_root
 
 
 def _read_lock_payload(lock_path: str) -> Tuple[Optional[int], Optional[float]]:

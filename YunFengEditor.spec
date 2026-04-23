@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -7,9 +8,33 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 project_root = Path(SPECPATH).resolve()
 dist_name = "YunFengEditor"
 
-skill_root = project_root / "jianying-editor-skill-main" / "jianying-editor-skill-main"
-ffmpeg_root = project_root / "ffmpeg-8.1-essentials_build"
-whisper_model = project_root / ".whisper_cache" / "base.pt"
+release_assets_root = project_root / ".release_assets"
+
+
+def resolve_path(env_name: str, default_path: Path, description: str, required: bool = True) -> Path:
+    candidate = Path(os.environ.get(env_name, "")).expanduser() if os.environ.get(env_name) else default_path
+    candidate = candidate.resolve()
+    if required and not candidate.exists():
+        raise SystemExit(f"Missing required release asset for {description}: {candidate}")
+    return candidate
+
+
+skill_root = resolve_path(
+    "OTC_RELEASE_SKILL_ROOT",
+    project_root / "jianying-editor-skill-main" / "jianying-editor-skill-main",
+    "skill root",
+)
+ffmpeg_root = resolve_path(
+    "OTC_RELEASE_FFMPEG_ROOT",
+    project_root / "ffmpeg-8.1-essentials_build",
+    "ffmpeg root",
+)
+whisper_model = resolve_path(
+    "OTC_RELEASE_WHISPER_MODEL",
+    release_assets_root / "whisper" / "base.pt",
+    "whisper base model",
+    required=False,
+)
 subtitle_panel = project_root / "subtitle_sync_panel.html"
 
 datas = [

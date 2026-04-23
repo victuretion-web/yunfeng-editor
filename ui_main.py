@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import sys
+import json
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -18,9 +19,17 @@ from batch_runtime_config import (
 )
 from draft_registry import get_draft_root, reconcile_root_meta
 from media_file_rules import scan_video_file_paths
+from subprocess_windows import run_hidden
 from text_output_utils import decode_process_output, repair_mojibake_text
 
 LOCKED_LLM_BASE_URL = "https://api.kuai.host/v1"
+STATUS_QUEUED = "排队中"
+STATUS_RUNNING = "生成中"
+STATUS_READY = "待发布"
+STATUS_FAILED = "失败"
+STATUS_ERROR = "异常"
+TASK_UI_REFRESH_MS = 1500
+UI_SETTINGS_PATH = runtime_path("output", "ui_settings.json")
 
 os.environ.update(build_runtime_env(os.environ))
 if hasattr(sys.stdout, "reconfigure"):
@@ -32,12 +41,13 @@ class YunFengEditorUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("云锋剪辑 - 智能视频生成系统 (专业版)")
-        self.geometry("950x850")
+        self._configure_window()
         self.configure(padx=10, pady=10)
 
         self.output_dir = runtime_path("output")
         self.task_logs_dir = os.path.join(self.output_dir, "task_logs")
         self.internal_log_path = os.path.join(self.output_dir, "internal_maintenance.log")
+        self.ui_settings_path = UI_SETTINGS_PATH
         os.makedirs(self.task_logs_dir, exist_ok=True)
 
         # 提前初始化 uiautomation 缓存，防止并发生成草稿时 comtypes 缓存冲突导致 Permission Denied
@@ -52,6 +62,9 @@ class YunFengEditorUI(tk.Tk):
         self.subprocess_slots = threading.BoundedSemaphore(SUBPROCESS_SLOT_LIMIT)
         self.task_count = 0
         self.running_tasks = {}
+        self._last_queue_status_text = ""
+        self._last_maintenance_status_text = ""
+        self._last_button_states = {}
 
         # 样式设置
         style = ttk.Style()
@@ -61,10 +74,23 @@ class YunFengEditorUI(tk.Tk):
         style.configure("Status.TLabel", font=('Microsoft YaHei', 10, 'bold'))
 
         self.create_widgets()
+        self._load_ui_settings()
         self.repair_draft_registry()
         # 启动时先清理一次历史残留的空草稿
         self.cleanup_empty_drafts()
-        self.after(1000, self.update_task_status_ui)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(TASK_UI_REFRESH_MS, self.update_task_status_ui)
+
+    def _configure_window(self):
+        screen_width = max(self.winfo_screenwidth(), 1280)
+        screen_height = max(self.winfo_screenheight(), 900)
+        window_width = min(max(1120, int(screen_width * 0.86)), screen_width - 40)
+        window_height = min(max(860, int(screen_height * 0.9)), screen_height - 60)
+        pos_x = max((screen_width - window_width) // 2, 0)
+        pos_y = max((screen_height - window_height) // 2, 0)
+
+        self.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+        self.minsize(min(window_width, 1080), min(window_height, 820))
 
     def create_widgets(self):
         # 1. 顶部标题
@@ -86,11 +112,96 @@ class YunFengEditorUI(tk.Tk):
         self.tab_auto_gen = ttk.Frame(self.notebook, padding=10)
         self.tab_tasks = ttk.Frame(self.notebook, padding=10)
 
-        self.notebook.add(self.tab_auto_gen, text="🎬 一键智能合成")
-        self.notebook.add(self.tab_tasks, text="📊 任务队列看板")
+        self.notebook.add(self.tab_auto_gen, text="一键智能合成")
+        self.notebook.add(self.tab_tasks, text="任务队列看板")
 
         self.build_auto_gen_tab()
         self.build_tasks_tab()
+
+    def _collect_ui_settings(self):
+        data = {
+            "entries": {},
+            "combo_values": {},
+            "scale_values": {},
+        }
+
+        if hasattr(self, "entries"):
+            for key, entry in self.entries.items():
+                data["entries"][key] = entry.get().strip()
+
+        if hasattr(self, "entry_llm_key"):
+            data["entries"]["llm_api_key"] = self.entry_llm_key.get().strip()
+        if hasattr(self, "entry_llm_model"):
+            data["entries"]["llm_model"] = self.entry_llm_model.get().strip()
+
+        if hasattr(self, "combo_sens"):
+            data["combo_values"]["sensitivity"] = self.combo_sens.get().strip()
+        if hasattr(self, "combo_res"):
+            data["combo_values"]["resolution"] = self.combo_res.get().strip()
+
+        if hasattr(self, "scale_ad_freq"):
+            data["scale_values"]["ad_freq"] = int(self.scale_ad_freq.get())
+        if hasattr(self, "scale_sticker_freq"):
+            data["scale_values"]["sticker_freq"] = int(self.scale_sticker_freq.get())
+        if hasattr(self, "scale_broll_freq"):
+            data["scale_values"]["broll_freq"] = int(self.scale_broll_freq.get())
+
+        return data
+
+    def _save_ui_settings(self):
+        try:
+            os.makedirs(os.path.dirname(self.ui_settings_path), exist_ok=True)
+            with open(self.ui_settings_path, "w", encoding="utf-8") as f:
+                json.dump(self._collect_ui_settings(), f, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            self._log_nonfatal_issue("ui_settings", f"界面设置保存失败: {exc}", exc=exc)
+
+    def _load_ui_settings(self):
+        if not os.path.exists(self.ui_settings_path):
+            return
+
+        try:
+            with open(self.ui_settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            self._log_nonfatal_issue("ui_settings", f"界面设置读取失败: {exc}", exc=exc)
+            return
+
+        for key, entry in getattr(self, "entries", {}).items():
+            value = str(data.get("entries", {}).get(key, "")).strip()
+            if value:
+                entry.delete(0, tk.END)
+                entry.insert(0, value)
+
+        llm_api_key = str(data.get("entries", {}).get("llm_api_key", "")).strip()
+        if llm_api_key:
+            self.entry_llm_key.delete(0, tk.END)
+            self.entry_llm_key.insert(0, llm_api_key)
+
+        llm_model = str(data.get("entries", {}).get("llm_model", "")).strip()
+        if llm_model:
+            self.entry_llm_model.delete(0, tk.END)
+            self.entry_llm_model.insert(0, llm_model)
+
+        sensitivity = str(data.get("combo_values", {}).get("sensitivity", "")).strip()
+        if sensitivity and sensitivity in self.combo_sens.cget("values"):
+            self.combo_sens.set(sensitivity)
+
+        resolution = str(data.get("combo_values", {}).get("resolution", "")).strip()
+        if resolution and resolution in self.combo_res.cget("values"):
+            self.combo_res.set(resolution)
+
+        scale_values = data.get("scale_values", {})
+        if "ad_freq" in scale_values:
+            self.scale_ad_freq.set(scale_values["ad_freq"])
+        if "sticker_freq" in scale_values:
+            self.scale_sticker_freq.set(scale_values["sticker_freq"])
+        if "broll_freq" in scale_values:
+            self.scale_broll_freq.set(scale_values["broll_freq"])
+
+    def on_close(self):
+        self._save_ui_settings()
+        self.destroy()
 
     def _append_internal_log(self, stage, message, exc=None):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -113,10 +224,49 @@ class YunFengEditorUI(tk.Tk):
 
     def build_auto_gen_tab(self):
         frame = self.tab_auto_gen
+        scroll_host = ttk.Frame(frame)
+        scroll_host.pack(fill="both", expand=True)
+
+        self.auto_gen_canvas = tk.Canvas(scroll_host, highlightthickness=0, borderwidth=0)
+        auto_scrollbar = ttk.Scrollbar(
+            scroll_host,
+            orient="vertical",
+            command=self.auto_gen_canvas.yview,
+        )
+        self.auto_gen_canvas.configure(yscrollcommand=auto_scrollbar.set)
+
+        auto_scrollbar.pack(side="right", fill="y")
+        self.auto_gen_canvas.pack(side="left", fill="both", expand=True)
+
+        content = ttk.Frame(self.auto_gen_canvas)
+        canvas_window = self.auto_gen_canvas.create_window((0, 0), window=content, anchor="nw")
+        self.auto_gen_content = content
+
+        def sync_scroll_region(_event=None):
+            self.auto_gen_canvas.configure(scrollregion=self.auto_gen_canvas.bbox("all"))
+
+        def sync_content_width(event):
+            self.auto_gen_canvas.itemconfigure(canvas_window, width=event.width)
+
+        content.bind("<Configure>", sync_scroll_region)
+        self.auto_gen_canvas.bind("<Configure>", sync_content_width)
+
+        def on_mousewheel(event):
+            if self.auto_gen_canvas.winfo_exists():
+                self.auto_gen_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self._auto_gen_mousewheel_handler = on_mousewheel
+
+        def bind_mousewheel_recursively(widget):
+            widget.bind("<MouseWheel>", self._auto_gen_mousewheel_handler)
+            for child in widget.winfo_children():
+                bind_mousewheel_recursively(child)
+        self._bind_auto_gen_mousewheel = bind_mousewheel_recursively
 
         # 1. 路径输入区
-        path_frame = ttk.LabelFrame(frame, text="素材路径配置 (必填)", padding=5)
+        path_frame = ttk.LabelFrame(content, text="素材路径配置 (必填)", padding=5)
         path_frame.pack(fill="x", pady=2)
+        path_frame.columnconfigure(1, weight=1)
 
         self.entries = {}
         
@@ -208,15 +358,16 @@ class YunFengEditorUI(tk.Tk):
             else:
                 messagebox.showwarning("提示", "统一总目录不存在！")
 
-        ttk.Button(path_frame, text="⬇️ 自动从总目录推导子路径", command=auto_fill_from_unified).grid(row=7, column=3, padx=5)
+        ttk.Button(path_frame, text="自动从总目录推导子路径", command=auto_fill_from_unified).grid(row=7, column=3, padx=5)
 
         # 1.5 LLM 大模型配置区
-        llm_frame = ttk.LabelFrame(frame, text="AI 大模型配置 (用于深度语义理解)", padding=5)
+        llm_frame = ttk.LabelFrame(content, text="AI 大模型配置 (用于深度语义理解)", padding=5)
         llm_frame.pack(fill="x", pady=2)
+        llm_frame.columnconfigure(1, weight=1)
+        llm_frame.columnconfigure(3, weight=1)
         
         ttk.Label(llm_frame, text="API Key:").grid(row=0, column=0, sticky="e", pady=3, padx=5)
         self.entry_llm_key = ttk.Entry(llm_frame, width=40, show="*")
-        self.entry_llm_key.insert(0, "sk-6qR79NVj7d15Yq9HejDdudvDeaMZ9O6xfV1rOhqwqtqQSaGZ")
         self.entry_llm_key.grid(row=0, column=1, sticky="w", pady=3, padx=5)
         
         ttk.Label(llm_frame, text="服务通道:").grid(row=0, column=2, sticky="e", pady=3, padx=5)
@@ -241,8 +392,10 @@ class YunFengEditorUI(tk.Tk):
         ttk.Label(llm_frame, text="*填写 API Key 后，系统将放弃死板的关键词规则，转为使用真正的大模型通读口播字幕，\n精准输出病症/产品插入点以及音效、BGM的情绪节点。", foreground="gray").grid(row=2, column=0, columnspan=4, sticky="w", pady=3, padx=5)
 
         # 2. 生成设置区
-        settings_frame = ttk.LabelFrame(frame, text="生成参数与频率控制", padding=5)
+        settings_frame = ttk.LabelFrame(content, text="生成参数与频率控制", padding=5)
         settings_frame.pack(fill="x", pady=2)
+        settings_frame.columnconfigure(1, weight=1)
+        settings_frame.columnconfigure(3, weight=1)
 
         ttk.Label(settings_frame, text="素材插入灵敏度:").grid(row=0, column=0, padx=5, pady=3)
         self.combo_sens = ttk.Combobox(settings_frame, values=["medium (推荐/中密)", "high (快节奏/高密)"], state="readonly", width=20)
@@ -270,14 +423,38 @@ class YunFengEditorUI(tk.Tk):
         self.scale_broll_freq.set(1) # 默认每任务只使用1次，严控重复
         self.scale_broll_freq.grid(row=2, column=1, padx=5, pady=3, sticky="w")
 
-        # 3. 动作区
         action_frame = ttk.Frame(frame)
-        action_frame.pack(fill="x", pady=5)
-        
-        self.btn_batch_add = ttk.Button(action_frame, text="🚀 批量生成全自动草稿 (零人工干预)", command=self.submit_batch_tasks)
-        self.btn_batch_add.pack(side="left", padx=5)
-        
-        ttk.Button(action_frame, text="📂 打开草稿目录预览", command=self.open_draft_folder).pack(side="right", padx=5)
+        action_frame.pack(fill="x", pady=(8, 0))
+
+        ttk.Separator(action_frame).pack(fill="x", pady=(0, 8))
+        action_bar = ttk.Frame(action_frame)
+        action_bar.pack(fill="x")
+
+        ttk.Label(
+            action_bar,
+            text="底部操作区固定显示，若上方内容较多可直接滚动查看。",
+            style="Info.TLabel",
+        ).pack(side="left", padx=(0, 10))
+
+        ttk.Button(
+            action_bar,
+            text="切换到任务看板",
+            command=lambda: self.notebook.select(self.tab_tasks),
+        ).pack(side="right", padx=5)
+        ttk.Button(
+            action_bar,
+            text="打开草稿目录预览",
+            command=self.open_draft_folder,
+        ).pack(side="right", padx=5)
+
+        self.btn_batch_add = ttk.Button(
+            action_bar,
+            text="批量生成全自动草稿",
+            command=self.submit_batch_tasks,
+        )
+        self.btn_batch_add.pack(side="right", padx=5)
+
+        self._bind_auto_gen_mousewheel(self.auto_gen_canvas)
 
     def build_tasks_tab(self):
         frame = self.tab_tasks
@@ -311,13 +488,13 @@ class YunFengEditorUI(tk.Tk):
         control_frame = ttk.Frame(frame)
         control_frame.pack(fill="x", pady=10)
         
-        self.btn_retry_failed = ttk.Button(control_frame, text="🔄 重试失败任务", command=self.retry_failed_tasks, state="disabled")
+        self.btn_retry_failed = ttk.Button(control_frame, text="重试失败任务", command=self.retry_failed_tasks, state="disabled")
         self.btn_retry_failed.pack(side="left", padx=5)
         
-        self.btn_export_json = ttk.Button(control_frame, text="📄 导出执行报告", command=self.export_report_json, state="disabled")
+        self.btn_export_json = ttk.Button(control_frame, text="导出执行报告", command=self.export_report_json, state="disabled")
         self.btn_export_json.pack(side="left", padx=5)
 
-        self.btn_open_internal_log = ttk.Button(control_frame, text="🧾 打开维护日志", command=self.open_internal_log)
+        self.btn_open_internal_log = ttk.Button(control_frame, text="打开维护日志", command=self.open_internal_log)
         self.btn_open_internal_log.pack(side="left", padx=5)
 
     def browse_file(self, entry_widget):
@@ -346,6 +523,52 @@ class YunFengEditorUI(tk.Tk):
         env["LLM_MODEL"] = self.entry_llm_model.get().strip()
         return env
 
+    def _set_button_state(self, button, state):
+        cache_key = str(button)
+        if self._last_button_states.get(cache_key) != state:
+            button.config(state=state)
+            self._last_button_states[cache_key] = state
+
+    def _run_worker_preflight(self):
+        result = run_hidden(
+            get_worker_command(["--preflight"]),
+            env=build_runtime_env(os.environ.copy()),
+            cwd=runtime_path(),
+            capture_output=True,
+            text=False,
+        )
+        stdout = repair_mojibake_text(decode_process_output(result.stdout))
+        stderr = repair_mojibake_text(decode_process_output(result.stderr))
+        if result.returncode not in (0, 1):
+            raise RuntimeError(stderr or stdout or "环境自检命令执行失败")
+
+        payload = stdout.strip()
+        if not payload:
+            raise RuntimeError(stderr or "环境自检没有返回结果")
+
+        return json.loads(payload)
+
+    def _ensure_runtime_ready(self):
+        report = self._run_worker_preflight()
+        fatal_errors = report.get("fatal_errors", [])
+        warnings = report.get("warnings", [])
+
+        if fatal_errors:
+            detail = "\n".join(f"- {item}" for item in fatal_errors)
+            messagebox.showerror("运行环境异常", f"当前环境无法正常生成草稿：\n{detail}")
+            return False
+
+        if warnings:
+            detail = "\n".join(f"- {item}" for item in warnings)
+            continue_run = messagebox.askyesno(
+                "兼容性提示",
+                f"检测到以下风险：\n{detail}\n\n是否仍然继续生成？",
+            )
+            if not continue_run:
+                return False
+
+        return True
+
     def test_llm_connectivity(self):
         api_key = self.entry_llm_key.get().strip()
         model = self.entry_llm_model.get().strip() or "deepseek-v3.2"
@@ -353,6 +576,7 @@ class YunFengEditorUI(tk.Tk):
             messagebox.showwarning("提示", "请先填写 API Key。")
             return
 
+        self._save_ui_settings()
         self.btn_test_llm.config(state="disabled")
         self.update_idletasks()
         try:
@@ -376,6 +600,9 @@ class YunFengEditorUI(tk.Tk):
         is_valid, msg = self.validate_paths()
         if not is_valid:
             messagebox.showerror("路径错误", msg)
+            return
+        self._save_ui_settings()
+        if not self._ensure_runtime_ready():
             return
 
         speech_dir = self.entries["speech"].get().strip()
@@ -431,14 +658,14 @@ class YunFengEditorUI(tk.Tk):
             return
 
         self.executor._max_workers = BATCH_CONCURRENCY
-        self.btn_batch_add.config(state="disabled")
+        self._set_button_state(self.btn_batch_add, "disabled")
 
         for video_file in speech_videos:
             self.task_count += 1
             task_id = f"Task-{self.task_count:03d}"
             submit_time = time.strftime("%H:%M:%S")
             
-            self.tree.insert("", "end", iid=task_id, values=(task_id, submit_time, "⌛ 排队中", f"准备处理: {video_file}"))
+            self.tree.insert("", "end", iid=task_id, values=(task_id, submit_time, STATUS_QUEUED, f"准备处理: {video_file}"))
             self.executor.submit(self.execute_task, task_id, env, sensitivity, video_file)
             
         self.notebook.select(self.tab_tasks)
@@ -446,12 +673,12 @@ class YunFengEditorUI(tk.Tk):
 
     def execute_task(self, task_id, env, sensitivity, video_file, retry_count=0):
         max_retries = BATCH_RETRY_LIMIT
-        self.running_tasks[task_id] = {"status": "🔄 生成中", "log": f"正在处理: {video_file} (重试: {retry_count})", "file": video_file}
+        self.running_tasks[task_id] = {"status": STATUS_RUNNING, "log": f"正在处理: {video_file} (重试: {retry_count})", "file": video_file}
         
         try:
             task_env = build_runtime_env(env)
             with self.subprocess_slots:
-                result = subprocess.run(
+                result = run_hidden(
                     get_worker_command(["--sensitivity", sensitivity, "--video", video_file]),
                     env=task_env,
                     cwd=runtime_path(),
@@ -465,7 +692,7 @@ class YunFengEditorUI(tk.Tk):
             if result.returncode == 0:
                 success_summary = self._summarize_process_output(result, success=True)
                 self.running_tasks[task_id] = {
-                    "status": "✅ 待发布",
+                    "status": STATUS_READY,
                     "log": f"{success_summary} | 日志: {log_path}",
                     "file": video_file,
                     "result": "SUCCESS",
@@ -477,7 +704,7 @@ class YunFengEditorUI(tk.Tk):
                 else:
                     err_msg = self._summarize_process_output(result, success=False)
                     self.running_tasks[task_id] = {
-                        "status": "❌ 失败",
+                        "status": STATUS_FAILED,
                         "log": f"{err_msg} | 日志: {log_path}",
                         "file": video_file,
                         "result": "FAILED",
@@ -487,7 +714,7 @@ class YunFengEditorUI(tk.Tk):
             if retry_count < max_retries:
                 self.execute_task(task_id, env, sensitivity, video_file, retry_count + 1)
             else:
-                self.running_tasks[task_id] = {"status": "❌ 异常", "log": str(e), "file": video_file, "result": "ERROR"}
+                self.running_tasks[task_id] = {"status": STATUS_ERROR, "log": str(e), "file": video_file, "result": "ERROR"}
 
     def _write_task_log(self, task_id, video_file, result):
         safe_name = re.sub(r'[<>:"/\\|?*]+', "_", os.path.splitext(video_file)[0])
@@ -527,29 +754,54 @@ class YunFengEditorUI(tk.Tk):
                     return line[-200:]
             return lines[-1][-200:]
 
-        keywords = ("[失败]", "Traceback", "RuntimeError", "Error", "错误", "当前版本不受支持", "核心文件未落盘")
+        preferred_keywords = (
+            "草稿目录不可写",
+            "当前未使用系统剪映草稿目录",
+            "未找到 ffmpeg",
+            "未找到 ffprobe",
+            "检测到剪映版本",
+            "核心文件未落盘",
+            "ImportError",
+            "ModuleNotFoundError",
+            "PermissionError",
+            "Permission denied",
+            "Traceback",
+            "RuntimeError",
+            "Error",
+            "错误",
+        )
+        skip_lines = {
+            "[失败] 视频创建失败，请检查错误信息",
+        }
+        for line in reversed(lines):
+            if line in skip_lines:
+                continue
+            if any(keyword in line for keyword in preferred_keywords):
+                return line[-240:]
+
+        keywords = ("[失败]", "Traceback", "RuntimeError", "Error", "错误")
         for line in reversed(lines):
             if any(keyword in line for keyword in keywords):
                 return line[-240:]
         return lines[-1][-240:]
 
-    def retry_failed_tasks(self):
-        env = os.environ.copy() # Need a way to recover env, or store it. For now, grab from entries
-        # Better to store env and sensitivity in the class or task info.
-        pass # Will implement properly next
-
 
     def update_task_status_ui(self):
-        # 更新队列统计文本
-        active = sum(1 for info in self.running_tasks.values() if info["status"] in ["🔄 生成中", "🔍 待人工确认"])
-        waiting = sum(1 for info in self.running_tasks.values() if info["status"] in ["⏳ 等待执行", "⌛ 排队中"])
-        failed = sum(1 for info in self.running_tasks.values() if info["status"] in ["❌ 失败", "❌ 异常"])
-        
+        # 更新队列统计文本（仅在文本变更时刷新，避免频繁重绘导致闪烁）
+        active = sum(1 for info in self.running_tasks.values() if info["status"] == STATUS_RUNNING)
+        waiting = sum(1 for info in self.running_tasks.values() if info["status"] == STATUS_QUEUED)
+        failed = sum(1 for info in self.running_tasks.values() if info["status"] in [STATUS_FAILED, STATUS_ERROR])
+
         mode_text = "【全自动批量模式】"
-        self.lbl_queue_status.config(text=f"{mode_text} 正在处理: {active} | 等待中: {waiting} | 失败: {failed} | 总计提交: {self.task_count}")
-        self.lbl_maintenance_status.config(
-            text=f"维护告警: {self.maintenance_warning_count} | {self.latest_maintenance_warning}"
-        )
+        queue_status_text = f"{mode_text} 正在处理: {active} | 等待中: {waiting} | 失败: {failed} | 总计提交: {self.task_count}"
+        if queue_status_text != self._last_queue_status_text:
+            self.lbl_queue_status.config(text=queue_status_text)
+            self._last_queue_status_text = queue_status_text
+
+        maintenance_status_text = f"维护告警: {self.maintenance_warning_count} | {self.latest_maintenance_warning}"
+        if maintenance_status_text != self._last_maintenance_status_text:
+            self.lbl_maintenance_status.config(text=maintenance_status_text)
+            self._last_maintenance_status_text = maintenance_status_text
 
         # 定时刷新任务列表的 UI
         for task_id, info in list(self.running_tasks.items()):
@@ -561,22 +813,30 @@ class YunFengEditorUI(tk.Tk):
                     vals[3] = info["log"]
                     self.tree.item(task_id, values=vals)
                     
-        # 激活/禁用按钮
-        if active == 0 and waiting == 0 and self.task_count > 0:
-            if not getattr(self, '_cleanup_done', False):
-                self.cleanup_empty_drafts()
-                self._cleanup_done = True
-                
-            self.btn_export_json.config(state="normal")
-            if failed > 0:
-                self.btn_retry_failed.config(state="normal")
-            self.btn_batch_add.config(state="normal")
+        # 空闲时应允许继续提交新任务；只有执行中或排队中才禁用提交按钮。
+        if active == 0 and waiting == 0:
+            self._set_button_state(self.btn_batch_add, "normal")
+            if self.task_count > 0:
+                if not getattr(self, '_cleanup_done', False):
+                    self.cleanup_empty_drafts()
+                    self._cleanup_done = True
+
+                self._set_button_state(self.btn_export_json, "normal")
+                if failed > 0:
+                    self._set_button_state(self.btn_retry_failed, "normal")
+                else:
+                    self._set_button_state(self.btn_retry_failed, "disabled")
+            else:
+                self._cleanup_done = False
+                self._set_button_state(self.btn_export_json, "disabled")
+                self._set_button_state(self.btn_retry_failed, "disabled")
         else:
             self._cleanup_done = False
-            self.btn_export_json.config(state="disabled")
-            self.btn_retry_failed.config(state="disabled")
-            
-        self.after(1000, self.update_task_status_ui)
+            self._set_button_state(self.btn_export_json, "disabled")
+            self._set_button_state(self.btn_retry_failed, "disabled")
+            self._set_button_state(self.btn_batch_add, "disabled")
+
+        self.after(TASK_UI_REFRESH_MS, self.update_task_status_ui)
 
     def cleanup_empty_drafts(self):
         """清理因为中途失败或中止残留的空草稿"""
@@ -656,6 +916,10 @@ class YunFengEditorUI(tk.Tk):
             print(f"草稿索引修复失败: {exc}")
 
     def retry_failed_tasks(self):
+        self._save_ui_settings()
+        if not self._ensure_runtime_ready():
+            return
+
         env = os.environ.copy()
         env["OTC_SPEECH_DIR"] = self.entries["speech"].get().strip()
         env["OTC_PRODUCT_DIR"] = self.entries["product"].get().strip()
@@ -675,13 +939,13 @@ class YunFengEditorUI(tk.Tk):
         
         retry_count = 0
         for task_id, info in self.running_tasks.items():
-            if info["status"] in ["❌ 失败", "❌ 异常"]:
+            if info["status"] in [STATUS_FAILED, STATUS_ERROR]:
                 self.executor.submit(self.execute_task, task_id, env, sensitivity, info["file"], 0)
                 retry_count += 1
                 
         if retry_count > 0:
             messagebox.showinfo("重试", f"已重新提交 {retry_count} 个失败任务！")
-            self.btn_retry_failed.config(state="disabled")
+            self._set_button_state(self.btn_retry_failed, "disabled")
             
     def export_report_json(self):
         import json

@@ -10,12 +10,18 @@ def is_frozen() -> bool:
 
 
 def get_resource_base_dir() -> str:
+    env_resource_dir = os.environ.get("OTC_APP_RESOURCE_DIR", "").strip()
+    if env_resource_dir:
+        return os.path.abspath(env_resource_dir)
     if is_frozen():
         return os.path.abspath(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)))
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def get_runtime_base_dir() -> str:
+    env_runtime_dir = os.environ.get("OTC_APP_RUNTIME_DIR", "").strip()
+    if env_runtime_dir:
+        return os.path.abspath(env_runtime_dir)
     if is_frozen():
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +36,42 @@ def runtime_path(*parts: str) -> str:
 
 
 def get_skill_root() -> str:
-    return resource_path(*SKILL_RELATIVE_PATH)
+    marker_relative = os.path.join("scripts", "jy_wrapper.py")
+    candidate_roots = []
+
+    def add_candidate(path: str) -> None:
+        normalized = os.path.abspath(path)
+        if normalized not in candidate_roots:
+            candidate_roots.append(normalized)
+
+    resource_base = get_resource_base_dir()
+    runtime_base = get_runtime_base_dir()
+
+    add_candidate(os.path.join(resource_base, *SKILL_RELATIVE_PATH))
+    add_candidate(os.path.join(runtime_base, *SKILL_RELATIVE_PATH))
+    add_candidate(os.path.join(runtime_base, "_internal", *SKILL_RELATIVE_PATH))
+    add_candidate(os.path.join(resource_base, "_internal", *SKILL_RELATIVE_PATH))
+
+    for base_dir in (resource_base, runtime_base):
+        if not base_dir or not os.path.isdir(base_dir):
+            continue
+        try:
+            for current_root, dirs, files in os.walk(base_dir):
+                if "jy_wrapper.py" in files and os.path.basename(current_root) == "scripts":
+                    discovered_root = os.path.dirname(current_root)
+                    add_candidate(discovered_root)
+                relative_path = os.path.relpath(current_root, base_dir)
+                if relative_path != "." and relative_path.count(os.sep) > 6:
+                    dirs[:] = []
+        except OSError:
+            continue
+
+    for candidate in candidate_roots:
+        marker_file = os.path.join(candidate, marker_relative)
+        if os.path.exists(marker_file):
+            return candidate
+
+    return os.path.join(resource_base, *SKILL_RELATIVE_PATH)
 
 
 def get_output_dir() -> str:

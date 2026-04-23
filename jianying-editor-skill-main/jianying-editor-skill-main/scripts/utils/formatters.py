@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 from typing import Dict, List, Union
+from subprocess_windows import run_hidden
 
 
 # ----------------- 路径自动探测 -----------------
@@ -142,7 +143,7 @@ def get_duration_ffprobe_cached(file_path: str) -> float:
     if not os.path.exists(file_path):
         return 0.0
     try:
-        result = subprocess.run(
+        result = run_hidden(
             [
                 "ffprobe",
                 "-v",

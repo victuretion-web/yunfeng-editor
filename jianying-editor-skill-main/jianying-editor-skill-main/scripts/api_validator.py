@@ -2,6 +2,7 @@ import argparse
 import os
 import subprocess
 import sys
+from subprocess_windows import run_hidden
 
 from utils.cli_protocol import emit_result, make_result
 from utils.errors import InfraError
@@ -24,7 +25,7 @@ def _bootstrap_import():
 
 def check_ffprobe() -> bool:
     try:
-        res = subprocess.run(
+        res = run_hidden(
             ["ffprobe", "-version"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

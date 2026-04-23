@@ -10,7 +10,9 @@ __pycache__/
 
 # Build artifacts
 build/
+build_*/
 dist/
+dist_*/
 *.spec.py
 
 # Runtime outputs
@@ -20,6 +22,7 @@ _sandbox_drafts/
 @AutomationLog.txt
 
 # Large local runtime assets
+.release_assets/
 .whisper_cache/
 ffmpeg.zip
 ffmpeg-8.1-essentials_build/

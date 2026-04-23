@@ -1,6 +1,7 @@
 import os
 import subprocess
 from typing import Optional
+from subprocess_windows import run_hidden
 
 
 def _norm_output_path(input_path: str) -> str:
@@ -67,7 +68,7 @@ def normalize_webm_for_jianying(input_path: str) -> Optional[str]:
     ]
 
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = run_hidden(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except FileNotFoundError:
         print("❌ FFmpeg not found. Cannot normalize WEBM for JianYing import.")
         return None

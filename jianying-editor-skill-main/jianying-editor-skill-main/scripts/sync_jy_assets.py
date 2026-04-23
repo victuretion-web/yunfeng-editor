@@ -4,6 +4,7 @@ import json
 import csv
 import shutil
 import subprocess
+from subprocess_windows import run_hidden
 
 # 1. 路径定义
 LOCAL_APP_DATA = os.getenv('LOCALAPPDATA')
@@ -18,7 +19,7 @@ DATA_DIR = os.path.join(SKILL_ROOT, "data")
 def get_duration_ffprobe(file_path):
     """尝试用 ffprobe 获取音频时长(秒)，失败返回 0"""
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", file_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5

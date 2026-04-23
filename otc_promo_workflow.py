@@ -14,6 +14,7 @@ import re
 import glob
 import csv
 import random
+import shutil
 import subprocess
 from typing import List, Dict, Optional, Tuple, Union
 from datetime import datetime
@@ -23,7 +24,9 @@ from app_paths import (
     get_bundled_whisper_model_path,
     get_output_dir,
     get_runtime_whisper_cache_dir,
+    resource_path,
 )
+from subprocess_windows import run_hidden
 
 
 try:
@@ -40,7 +43,13 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from jy_wrapper import JyProject, draft
-from draft_registry import get_draft_root, reconcile_root_meta, file_lock
+from draft_registry import (
+    file_lock,
+    get_draft_root,
+    get_official_draft_root,
+    is_portable_draft_root,
+    reconcile_root_meta,
+)
 from material_pool_rules import validate_material_pools, write_material_pool_report
 from media_identity import build_media_identity
 from media_file_rules import (
@@ -277,6 +286,74 @@ def is_supported_jianying_version(version: Optional[str]) -> bool:
     return major < 5 or (major == 5 and minor <= 9)
 
 
+def build_runtime_preflight_report() -> Dict[str, object]:
+    report: Dict[str, object] = {
+        "fatal_errors": [],
+        "warnings": [],
+        "checks": {},
+    }
+
+    draft_root = get_draft_root()
+    official_root = get_official_draft_root()
+    detected_version = detect_jianying_version()
+    ffmpeg_path = shutil.which("ffmpeg") or resource_path("ffmpeg-8.1-essentials_build", "bin", "ffmpeg.exe")
+    ffprobe_path = shutil.which("ffprobe") or resource_path("ffmpeg-8.1-essentials_build", "bin", "ffprobe.exe")
+    skill_wrapper_path = resource_path(
+        "jianying-editor-skill-main",
+        "jianying-editor-skill-main",
+        "scripts",
+        "jy_wrapper.py",
+    )
+
+    report["checks"] = {
+        "draft_root": draft_root,
+        "official_draft_root": official_root,
+        "using_portable_draft_root": is_portable_draft_root(draft_root),
+        "localappdata": os.environ.get("LOCALAPPDATA", ""),
+        "skill_wrapper_exists": os.path.exists(skill_wrapper_path),
+        "ffmpeg_path": ffmpeg_path,
+        "ffmpeg_exists": os.path.exists(ffmpeg_path) if ffmpeg_path else False,
+        "ffprobe_path": ffprobe_path,
+        "ffprobe_exists": os.path.exists(ffprobe_path) if ffprobe_path else False,
+        "detected_jianying_version": detected_version,
+        "supported_jianying_version": is_supported_jianying_version(detected_version),
+    }
+
+    try:
+        os.makedirs(draft_root, exist_ok=True)
+        probe_path = os.path.join(draft_root, ".draft_write_probe.tmp")
+        with open(probe_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe_path)
+        report["checks"]["draft_root_writable"] = True
+    except Exception as exc:
+        report["checks"]["draft_root_writable"] = False
+        report["fatal_errors"].append(f"草稿目录不可写: {draft_root} ({exc})")
+
+    if not report["checks"]["skill_wrapper_exists"]:
+        report["fatal_errors"].append(f"缺少打包资源: {skill_wrapper_path}")
+
+    if not report["checks"]["ffmpeg_exists"]:
+        report["fatal_errors"].append("未找到 ffmpeg，可执行文件未正确打包或被拦截。")
+
+    if not report["checks"]["ffprobe_exists"]:
+        report["fatal_errors"].append("未找到 ffprobe，可执行文件未正确打包或被拦截。")
+
+    if report["checks"]["using_portable_draft_root"]:
+        report["warnings"].append(
+            f"当前未使用系统剪映草稿目录，已回退到便携草稿目录: {draft_root}"
+        )
+
+    if not detected_version:
+        report["warnings"].append("未检测到剪映版本，将继续生成草稿，但无法保证可直接在剪映中显示。")
+    elif not report["checks"]["supported_jianying_version"]:
+        report["warnings"].append(
+            f"检测到剪映版本 {detected_version}，非 5.9 兼容版本，草稿可能无法在剪映中直接打开。"
+        )
+
+    return report
+
+
 def validate_saved_draft(project: JyProject) -> str:
     """强校验草稿是否真正落盘，避免仅生成报告却误判成功。"""
     draft_path = os.path.join(project.root, project.name)
@@ -347,7 +424,7 @@ def collect_video_files(directory: str, log_skipped_audio: bool = False, source_
 def _probe_media_duration(filepath: str) -> float:
     """用 ffprobe/ffmpeg 获取媒体时长，兼容视频与纯音频输入。"""
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filepath],
             capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore'
         )
@@ -358,7 +435,7 @@ def _probe_media_duration(filepath: str) -> float:
         pass
 
     try:
-        result = subprocess.run(
+        result = run_hidden(
             ['ffmpeg', '-i', filepath, '-f', 'null', '-'],
             capture_output=True, text=True, encoding='utf-8', errors='ignore'
         )
@@ -472,7 +549,7 @@ def transcribe_with_ai(video_path: str) -> List[Dict]:
             "-ar", "16000", "-ac", "1", "-f", "wav",
             temp_audio_path, "-y"
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        result = run_hidden(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         if result.returncode != 0:
             raise RuntimeError(f"FFmpeg提取音频失败: {result.stderr[:200]}")
 
@@ -572,7 +649,7 @@ def _transcribe_with_ffmpeg_srt(video_path: str) -> List[Dict]:
     try:
         import subprocess
         cmd = ["ffmpeg", "-i", video_path, "-f", "null", "-"]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+        result = run_hidden(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
         duration_match = re.search(r'Duration:\s*(\d+):(\d+):(\d+\.\d+)', result.stderr)
         if duration_match:
             h, m, s = duration_match.groups()
@@ -1199,9 +1276,9 @@ def create_otc_promo_video(
 
         detected_version = detect_jianying_version()
         if detected_version and not is_supported_jianying_version(detected_version):
-            raise RuntimeError(
-                f"检测到当前剪映版本为 {detected_version}，"
-                "该流程依赖 5.9 及以下版本的草稿结构，当前版本不受支持。"
+            print(
+                f"   [WARN] 检测到当前剪映版本为 {detected_version}，"
+                "非 5.9 兼容版本。将继续生成草稿，但无法保证可直接在剪映中打开。"
             )
         if not detected_version:
             print("   [WARN] 未能自动识别剪映版本，将继续尝试生成草稿。")
@@ -1212,14 +1289,14 @@ def create_otc_promo_video(
         speech_duration = 0
         import subprocess
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', speech_video],
                 capture_output=True, text=True, check=True, encoding='utf-8', errors='ignore'
             )
             speech_duration = float(result.stdout.strip())
         except Exception:
             try:
-                result = subprocess.run(
+                result = run_hidden(
                     ['ffmpeg', '-i', speech_video, '-f', 'null', '-'],
                     capture_output=True, text=True, encoding='utf-8', errors='ignore'
                 )
@@ -1254,7 +1331,13 @@ def create_otc_promo_video(
             timestamp = datetime.now().strftime("%H%M%S")
             version_suffix = "_审查版" if is_review_version else "_干净版"
             unique_project_name = f"{project_name}{version_suffix}_{timestamp}"
-            project = JyProject(unique_project_name, overwrite=True, width=1080, height=1920)
+            project = JyProject(
+                unique_project_name,
+                overwrite=True,
+                width=1080,
+                height=1920,
+                drafts_root=draft_root,
+            )
 
             if is_review_version:
                 project.script.add_track(draft.TrackType.video, "07_Review_Watermark", absolute_index=30000)
@@ -1665,7 +1748,14 @@ def main():
                         help='素材插入灵敏度: medium=中密度, high=高密度')
     parser.add_argument('--video', '-v', type=str, default=None,
                         help='指定口播视频文件名（不指定则自动选择）')
+    parser.add_argument('--preflight', action='store_true',
+                        help='执行打包运行环境自检并输出 JSON 结果')
     args = parser.parse_args()
+
+    if args.preflight:
+        report = build_runtime_preflight_report()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if not report["fatal_errors"] else 1
 
     print("=" * 80)
     print("OTC药品推广视频智能剪辑工作流")
