@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+.venv_release/
+
+# Build artifacts
+build/
+dist/
+*.spec.py
+
+# Runtime outputs
+output/
+batch_generation_report.json
+_sandbox_drafts/
+@AutomationLog.txt
+
+# Large local runtime assets
+.whisper_cache/
+ffmpeg.zip
+ffmpeg-8.1-essentials_build/
+
+# IDE / local assistant state
+.trae/
+.claw/
+.clawd-todos.json
+
+# Test caches
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db

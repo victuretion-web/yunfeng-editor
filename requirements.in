@@ -1,0 +1,16 @@
+edge-tts
+httpx
+imageio
+numpy
+openai
+openai-whisper
+opencv-python
+psutil
+pydub
+pymediainfo
+pynput
+requests
+tiktoken
+torch
+uiautomation
+websockets
