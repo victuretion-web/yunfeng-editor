@@ -29,37 +29,28 @@ ffmpeg_root = resolve_path(
     project_root / "ffmpeg-8.1-essentials_build",
     "ffmpeg root",
 )
-whisper_model = resolve_path(
-    "OTC_RELEASE_WHISPER_MODEL",
-    release_assets_root / "whisper" / "base.pt",
-    "whisper base model",
-    required=False,
-)
-subtitle_panel = project_root / "subtitle_sync_panel.html"
-
 datas = [
     (str(skill_root), "jianying-editor-skill-main/jianying-editor-skill-main"),
     (str(ffmpeg_root), "ffmpeg-8.1-essentials_build"),
 ]
 
-if whisper_model.exists():
-    datas.append((str(whisper_model), ".whisper_cache"))
 
-if subtitle_panel.exists():
-    datas.append((str(subtitle_panel), "."))
-
-datas += collect_data_files("whisper")
 datas += collect_data_files("tiktoken")
 datas += collect_data_files("imageio")
 
 hiddenimports = [
     "llm_clip_matcher",
+    "audioop",
+    "bgm_pipeline",
     "edge_tts",
+    "insert_density",
+    "pyaudioop",
     "pymediainfo",
     "requests",
+    "semantic_matcher",
     "uiautomation",
 ]
-hiddenimports += collect_submodules("whisper")
+
 hiddenimports += collect_submodules("tiktoken")
 hiddenimports += collect_submodules("pynput")
 

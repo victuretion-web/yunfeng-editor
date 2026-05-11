@@ -5,10 +5,18 @@ import shutil
 import subprocess
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _safe_run(stage, func, *args):
+    try:
+        return func(*args)
+    except Exception:
+        return {"error": traceback.format_exc(), "stage": stage, "ok": False}
 
 
 def check_exists(path: Path) -> dict:
@@ -229,6 +237,7 @@ def main() -> int:
         "dist_root": str(dist_root),
         "checks": {
             "exe": check_exists(exe_path),
+            "base_library": check_exists(internal_root / "base_library.zip"),
             "ffmpeg": check_exists(ffmpeg_path),
             "ffprobe": check_exists(internal_root / "ffmpeg-8.1-essentials_build" / "bin" / "ffprobe.exe"),
             "skill_wrapper": check_exists(
@@ -238,8 +247,8 @@ def main() -> int:
                 / "scripts"
                 / "jy_wrapper.py"
             ),
-            "whisper_base_model": check_exists(internal_root / ".whisper_cache" / "base.pt"),
-            "subtitle_panel": check_exists(internal_root / "subtitle_sync_panel.html"),
+
+
         },
         "worker_help": None,
         "worker_preflight": None,
@@ -254,19 +263,19 @@ def main() -> int:
         print(f"[失败] 未找到发布程序: {exe_path}")
         return 1
 
-    report["worker_help"] = run_worker_help(exe_path)
-    report["worker_preflight"] = run_worker_preflight(exe_path, dist_root)
-    report["gui_smoke_test"] = run_gui_smoke_test(exe_path, dist_root)
-    report["smoke_generation"] = run_smoke_generation(exe_path, dist_root, ffmpeg_path)
+    report["worker_help"] = _safe_run("worker_help", run_worker_help, exe_path)
+    report["worker_preflight"] = _safe_run("worker_preflight", run_worker_preflight, exe_path, dist_root)
+    report["gui_smoke_test"] = _safe_run("gui_smoke_test", run_gui_smoke_test, exe_path, dist_root)
+    report["smoke_generation"] = _safe_run("smoke_generation", run_smoke_generation, exe_path, dist_root, ffmpeg_path)
 
-    required_keys = ["exe", "ffmpeg", "ffprobe", "skill_wrapper"]
-    required_ok = all(report["checks"][key]["exists"] for key in required_keys)
+    required_keys = ["exe", "base_library", "ffmpeg", "ffprobe", "skill_wrapper"]
+    required_ok = all(report["checks"][key].get("exists", False) for key in required_keys)
     report["ok"] = (
         required_ok
-        and report["worker_help"]["ok"]
-        and report["worker_preflight"]["ok"]
-        and report["gui_smoke_test"]["still_running_after_8s"]
-        and report["smoke_generation"]["ok"]
+        and (report.get("worker_help") or {}).get("ok", False)
+        and (report.get("worker_preflight") or {}).get("ok", False)
+        and (report.get("gui_smoke_test") or {}).get("still_running_after_8s", False)
+        and (report.get("smoke_generation") or {}).get("ok", False)
     )
 
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1,7 +1,18 @@
 import os
 
 
-BATCH_CONCURRENCY = 5
+def _get_batch_concurrency() -> int:
+    value = os.environ.get("OTC_BATCH_CONCURRENCY", "").strip()
+    if not value:
+        return 5
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 5
+    return max(1, parsed)
+
+
+BATCH_CONCURRENCY = _get_batch_concurrency()
 SUBPROCESS_SLOT_LIMIT = BATCH_CONCURRENCY
 LLM_CONNECTION_POOL_LIMIT = BATCH_CONCURRENCY
 TASK_QUEUE_CAPACITY = max(100, BATCH_CONCURRENCY * 20)

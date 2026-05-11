@@ -8,7 +8,6 @@ $BuildStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $DistDir = Join-Path $ProjectRoot "dist"
 $BuildDir = Join-Path $ProjectRoot "build"
 $ReleaseAssetsRoot = Join-Path $ProjectRoot ".release_assets"
-$WhisperAssetDir = Join-Path $ReleaseAssetsRoot "whisper"
 $LocalFfmpegRoot = Join-Path $ProjectRoot "ffmpeg-8.1-essentials_build"
 $Env:OTC_RELEASE_SKILL_ROOT = Join-Path $ProjectRoot "jianying-editor-skill-main\jianying-editor-skill-main"
 
@@ -39,16 +38,6 @@ if (Test-Path $LocalFfmpegRoot) {
 
 if (-not $Env:OTC_RELEASE_FFMPEG_ROOT -or -not (Test-Path $Env:OTC_RELEASE_FFMPEG_ROOT)) {
     throw "FFmpeg root not found. Set OTC_RELEASE_FFMPEG_ROOT or place ffmpeg under $LocalFfmpegRoot"
-}
-
-New-Item -ItemType Directory -Path $WhisperAssetDir -Force | Out-Null
-$Env:OTC_RELEASE_WHISPER_MODEL = Join-Path $WhisperAssetDir "base.pt"
-if (-not (Test-Path $Env:OTC_RELEASE_WHISPER_MODEL)) {
-    Write-Host "==> Prepare Whisper base model"
-    & $PythonExe -c "import whisper, pathlib; target = pathlib.Path(r'$WhisperAssetDir'); target.mkdir(parents=True, exist_ok=True); whisper.load_model('base', download_root=str(target))"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to prepare Whisper base model"
-    }
 }
 
 Write-Host "==> Clean old build folders"
@@ -86,11 +75,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item (Join-Path $ProjectRoot "RELEASE_GUIDE.md") (Join-Path $ReleaseDir "RELEASE_GUIDE.md") -Force
+Copy-Item (Join-Path $ProjectRoot "发布使用说明.md") (Join-Path $ReleaseDir "发布使用说明.md") -Force
+Copy-Item (Join-Path $ProjectRoot "环境配置说明.md") (Join-Path $ReleaseDir "环境配置说明.md") -Force
+Copy-Item (Join-Path $ProjectRoot ".env.example") (Join-Path $ReleaseDir ".env.example") -Force
+Copy-Item (Join-Path $ProjectRoot "requirements.txt") (Join-Path $ReleaseDir "requirements.txt") -Force
+Copy-Item (Join-Path $ProjectRoot "requirements-dev.txt") (Join-Path $ReleaseDir "requirements-dev.txt") -Force
 
 $ZipPath = Join-Path $DistDir "YunFengEditor-portable-win64.zip"
 if (Test-Path $ZipPath) {
     Remove-Item $ZipPath -Force
 }
-Compress-Archive -Path (Join-Path $ReleaseDir "*") -DestinationPath $ZipPath -Force
+
+& $PythonExe -c "import pathlib, shutil; dist_dir = pathlib.Path(r'$DistDir'); release_dir = pathlib.Path(r'$ReleaseDir'); zip_base = dist_dir / 'YunFengEditor-portable-win64'; zip_path = zip_base.with_suffix('.zip'); zip_path.exists() and zip_path.unlink(); shutil.make_archive(str(zip_base), 'zip', root_dir=str(dist_dir), base_dir=release_dir.name)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create release zip"
+}
 
 Write-Host "==> Build finished: $ReleaseDir"

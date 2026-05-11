@@ -36,6 +36,7 @@ def apply_hidden_process_options(kwargs: Dict[str, Any] | None = None) -> Dict[s
 
 
 def run_hidden(command, **kwargs):
+    kwargs.setdefault("timeout", 1800)  # 30 min safety net; override with timeout=None for no limit
     return subprocess.run(command, **apply_hidden_process_options(kwargs))
 
 

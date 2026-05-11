@@ -78,13 +78,6 @@ def get_output_dir() -> str:
     return runtime_path("output")
 
 
-def get_runtime_whisper_cache_dir() -> str:
-    return runtime_path(".whisper_cache")
-
-
-def get_bundled_whisper_model_path(model_name: str) -> str:
-    return resource_path(".whisper_cache", f"{model_name}.pt")
-
 
 def ensure_skill_scripts_on_path() -> str:
     skill_root = get_skill_root()
@@ -105,7 +98,6 @@ def ensure_skill_scripts_on_path() -> str:
 
 def ensure_runtime_directories() -> None:
     os.makedirs(get_output_dir(), exist_ok=True)
-    os.makedirs(get_runtime_whisper_cache_dir(), exist_ok=True)
 
 
 def get_launcher_script_path() -> str:
@@ -126,12 +118,15 @@ def get_worker_command(extra_args: Optional[Iterable[str]] = None) -> List[str]:
 def build_runtime_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     env = dict(base_env or os.environ)
     ffmpeg_bin = resource_path("ffmpeg-8.1-essentials_build", "bin")
+    if not os.path.isdir(ffmpeg_bin):
+        # When frozen, ffmpeg may be under _internal/
+        ffmpeg_bin = resource_path("_internal", "ffmpeg-8.1-essentials_build", "bin")
     if os.path.isdir(ffmpeg_bin):
         env["PATH"] = ffmpeg_bin + os.pathsep + env.get("PATH", "")
     env.setdefault("OTC_APP_RESOURCE_DIR", get_resource_base_dir())
     env.setdefault("OTC_APP_RUNTIME_DIR", get_runtime_base_dir())
     env.setdefault("OTC_OUTPUT_DIR", get_output_dir())
-    env.setdefault("OTC_WHISPER_CACHE_DIR", get_runtime_whisper_cache_dir())
+
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
     return env

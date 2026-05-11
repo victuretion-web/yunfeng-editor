@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 import time
@@ -6,6 +7,8 @@ from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 from app_paths import runtime_path
+
+MANAGED_DRAFT_PREFIXES: Tuple[str, ...] = ("OTC推广_", "OTCPreview")
 
 
 def get_official_draft_root() -> str:
@@ -71,7 +74,11 @@ def _read_lock_payload(lock_path: str) -> Tuple[Optional[int], Optional[float]]:
         return None, None
 
     try:
-        return int(parts[0]), float(parts[1])
+        pid = int(parts[0])
+        created_at = float(parts[1])
+        if not math.isfinite(created_at) or pid <= 0:
+            return None, None
+        return pid, created_at
     except ValueError:
         return None, None
 
@@ -147,6 +154,32 @@ def _is_hidden_name(name: str) -> bool:
     return name.startswith(".")
 
 
+def _is_recycle_archive_name(name: str) -> bool:
+    return name.startswith(".recycle_archive_")
+
+
+def _normalize_project_prefixes(project_prefixes: Tuple[str, ...]) -> Tuple[str, ...]:
+    merged: List[str] = []
+    for prefix in (*MANAGED_DRAFT_PREFIXES, *(project_prefixes or ())):
+        normalized = str(prefix or "").strip()
+        if normalized and normalized not in merged:
+            merged.append(normalized)
+    return tuple(merged)
+
+
+def _matches_project_prefix(name: str, project_prefixes: Tuple[str, ...]) -> bool:
+    if not project_prefixes:
+        return True
+    return any(name.startswith(prefix) for prefix in project_prefixes)
+
+
+def _first_not_none(*values):
+    for v in values:
+        if v is not None:
+            return str(v)
+    return ""
+
+
 def _read_valid_draft(draft_dir: str) -> Tuple[Optional[Dict], Optional[str]]:
     content_path = os.path.join(draft_dir, "draft_content.json")
     meta_path = os.path.join(draft_dir, "draft_meta_info.json")
@@ -160,7 +193,9 @@ def _read_valid_draft(draft_dir: str) -> Tuple[Optional[Dict], Optional[str]]:
     if meta is None:
         return None, f"invalid draft_meta_info.json: {meta_err}"
 
-    draft_id = str(meta.get("draft_id") or meta.get("id") or content.get("id") or "").strip()
+    draft_id = _first_not_none(
+        meta.get("draft_id"), meta.get("id"), content.get("id"),
+    ).strip()
     if not draft_id:
         return None, "missing draft id"
 
@@ -170,6 +205,58 @@ def _read_valid_draft(draft_dir: str) -> Tuple[Optional[Dict], Optional[str]]:
         "draft_json_file": content_path.replace("\\", "/"),
         "name": os.path.basename(draft_dir),
     }, None
+
+
+def _extract_indexed_draft_names(root_meta: Optional[Dict]) -> List[str]:
+    if not isinstance(root_meta, dict):
+        return []
+
+    indexed_names: List[str] = []
+    for item in root_meta.get("all_draft_store", []) or []:
+        if not isinstance(item, dict):
+            continue
+        draft_fold_path = str(item.get("draft_fold_path") or "").strip()
+        if not draft_fold_path:
+            continue
+        name = os.path.basename(draft_fold_path.replace("/", os.sep))
+        if name:
+            indexed_names.append(name)
+    return indexed_names
+
+
+def _iter_recycle_sources(draft_root: str) -> List[Tuple[str, str]]:
+    sources: List[Tuple[str, str]] = []
+    recycle_bin = os.path.join(draft_root, ".recycle_bin")
+    if os.path.isdir(recycle_bin):
+        sources.append(("recycle_bin", recycle_bin))
+
+    archive_dirs: List[str] = []
+    for name in os.listdir(draft_root):
+        if not _is_recycle_archive_name(name):
+            continue
+        archive_path = os.path.join(draft_root, name)
+        if os.path.isdir(archive_path):
+            archive_dirs.append(archive_path)
+
+    # Newer archive directories use larger timestamp suffixes.
+    for archive_path in sorted(archive_dirs, reverse=True):
+        sources.append(("recycle_archive", archive_path))
+    return sources
+
+
+def _can_restore_to_target(target_path: str) -> bool:
+    if not os.path.exists(target_path):
+        return True
+
+    if not os.path.isdir(target_path):
+        return False
+
+    draft_entry, _ = _read_valid_draft(target_path)
+    if draft_entry:
+        return False
+
+    shutil.rmtree(target_path, ignore_errors=False)
+    return True
 
 
 def reconcile_root_meta(
@@ -184,29 +271,43 @@ def reconcile_root_meta(
     recycle_bin = os.path.join(draft_root, ".recycle_bin")
     root_meta_path = os.path.join(draft_root, "root_meta_info.json")
     lock_path = lock_path or os.path.join(draft_root, ".root_meta_info.lock")
+    project_prefixes = _normalize_project_prefixes(project_prefixes)
 
     report = {
         "draft_root": draft_root,
         "restored_from_recycle": [],
+        "restored_from_archive": [],
         "invalid_drafts": [],
         "registered_drafts": [],
         "written_at": int(time.time()),
     }
 
     with file_lock(lock_path, timeout=120.0):
-        if restore_project_drafts and os.path.isdir(recycle_bin):
-            for name in os.listdir(recycle_bin):
-                if project_prefixes and not any(name.startswith(prefix) for prefix in project_prefixes):
-                    continue
-                recycle_path = os.path.join(recycle_bin, name)
-                target_path = os.path.join(draft_root, name)
-                if not os.path.isdir(recycle_path) or os.path.exists(target_path):
-                    continue
-                draft_entry, _ = _read_valid_draft(recycle_path)
-                if not draft_entry:
-                    continue
-                shutil.move(recycle_path, target_path)
-                report["restored_from_recycle"].append(name)
+        recycle_sources = _iter_recycle_sources(draft_root)
+        root_meta, _ = _load_json(root_meta_path)
+        indexed_names = set(_extract_indexed_draft_names(root_meta))
+
+        if restore_project_drafts:
+            for source_kind, source_root in recycle_sources:
+                for name in os.listdir(source_root):
+                    if not _matches_project_prefix(name, project_prefixes):
+                        continue
+                    source_path = os.path.join(source_root, name)
+                    if not os.path.isdir(source_path):
+                        continue
+                    draft_entry, _ = _read_valid_draft(source_path)
+                    if not draft_entry:
+                        continue
+
+                    target_path = os.path.join(draft_root, name)
+                    if not _can_restore_to_target(target_path):
+                        continue
+
+                    shutil.move(source_path, target_path)
+                    if source_kind == "recycle_archive":
+                        report["restored_from_archive"].append(name)
+                    else:
+                        report["restored_from_recycle"].append(name)
 
         all_draft_store: List[Dict] = []
         for name in sorted(os.listdir(draft_root)):

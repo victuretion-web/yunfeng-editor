@@ -17,9 +17,13 @@ dist_*/
 
 # Runtime outputs
 output/
+output_h_tixuan_*/
+output_*/
 batch_generation_report.json
 _sandbox_drafts/
 @AutomationLog.txt
+demo_preview_pack/
+my_bg_music/
 
 # Large local runtime assets
 .release_assets/
@@ -29,6 +33,7 @@ ffmpeg-8.1-essentials_build/
 
 # IDE / local assistant state
 .trae/
+.claude/
 .claw/
 .clawd-todos.json
 

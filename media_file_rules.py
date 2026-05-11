@@ -2,7 +2,7 @@ import os
 from typing import List, Tuple
 
 
-SUPPORTED_VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".wmv", ".mkv", ".m4v")
+SUPPORTED_VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".wmv", ".mkv", ".m4v", ".webm", ".flv")
 SUPPORTED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg")
 GENERATED_ARTIFACT_KEYWORDS = ("OTC推广", "干净版", "审查版")
 

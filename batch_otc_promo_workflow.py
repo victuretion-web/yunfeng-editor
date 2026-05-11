@@ -16,7 +16,6 @@ os.environ.update(build_runtime_env(os.environ))
 # 导入主工作流模块
 from otc_promo_workflow import (
     collect_video_files,
-    transcribe_with_ai,
     smart_material_matching,
     create_otc_promo_video,
     SPEECH_DIR,
@@ -35,7 +34,6 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
         'video': speech_video['filename'],
         'project': f"OTC推广_{os.path.splitext(speech_video['filename'])[0]}",
         'status': '失败',
-        'subtitles': 0,
         'matches': 0,
         'product_matches': 0,
         'symptom_matches': 0,
@@ -43,7 +41,7 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
     }
 
     try:
-        subtitles = transcribe_with_ai(speech_video['path'])
+        video_duration = float(speech_video.get('duration', 0))
         limits = {
             "ad_review": AD_FREQ_LIMIT,
             "sticker": STICKER_FREQ_LIMIT,
@@ -51,16 +49,14 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
         }
         tracker = UsageTracker(limits)
         matches, sfx_list, bgm_emotion = smart_material_matching(
-            subtitles,
+            video_duration,
             product_videos,
             symptom_videos,
             sensitivity=sensitivity,
-            video_duration=speech_video['duration'],
             video_id=os.path.splitext(speech_video['filename'])[0],
             tracker=tracker
         )
 
-        result['subtitles'] = len(subtitles)
         result['matches'] = len(matches)
         result['symptom_matches'] = sum(1 for m in matches if m['material_type'] == "病症困扰")
         result['product_matches'] = sum(1 for m in matches if m['material_type'] == "产品展示")
@@ -69,7 +65,6 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
             result['project'],
             speech_video['path'],
             matches,
-            subtitles,
             sfx_list=sfx_list,
             bgm_emotion=bgm_emotion,
             tracker=tracker,
@@ -213,7 +208,7 @@ def batch_process_otc_videos(sensitivity='high', limit=0):
         status_icon = "[成功]" if result['status'] == '成功' else "[失败]"
         print(f"{status_icon} {result['video']:<40} -> {result['project']}")
         if result['status'] == '成功':
-            print(f"      字幕: {result['subtitles']} 条, 素材: {result['matches']} 处")
+            print(f"      素材: {result['matches']} 处")
 
     print("\n您可以在剪映中打开这些草稿进行人工审核和修改")
     print("=" * 80)
