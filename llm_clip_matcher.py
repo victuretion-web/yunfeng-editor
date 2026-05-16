@@ -630,7 +630,7 @@ def plan_insertions_with_keywords(
 
     target_count = max(4, int(video_duration / 15))
     if len(b_rolls) < target_count:
-        existing_starts = {float(b["end"]) for b in b_rolls}
+        existing_starts = {float(b["start"]) for b in b_rolls}
         step = video_duration / (target_count + 1) if target_count > 0 else 10.0
         for i in range(target_count):
             start = step * (i + 1)
