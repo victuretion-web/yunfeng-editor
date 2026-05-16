@@ -24,12 +24,16 @@ _sandbox_drafts/
 @AutomationLog.txt
 demo_preview_pack/
 my_bg_music/
+internal_maintenance.log
 
 # Large local runtime assets
 .release_assets/
 .whisper_cache/
 ffmpeg.zip
 ffmpeg-8.1-essentials_build/
+FireRed-OpenStoryline-main/
+FireRed-OpenStoryline-main.zip
+_tmp_keep_latest_*.py
 
 # IDE / local assistant state
 .trae/
