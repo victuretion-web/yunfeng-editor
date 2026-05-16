@@ -29,10 +29,10 @@ def _load_whisper_model() -> Optional[object]:
     """懒加载 Whisper base 模型（单例，线程安全）。"""
     global _WHISPER_MODEL
     if _WHISPER_MODEL is not None:
-        return _WHISPER_MODEL
+        return None if _WHISPER_MODEL is False else _WHISPER_MODEL
     with _WHISPER_MODEL_LOCK:
         if _WHISPER_MODEL is not None:
-            return _WHISPER_MODEL
+            return None if _WHISPER_MODEL is False else _WHISPER_MODEL
         try:
             import whisper
             _WHISPER_MODEL = whisper.load_model("base")
@@ -51,6 +51,7 @@ def extract_audio_from_video(video_path: str) -> Optional[str]:
     ffmpeg = _resolve_ffmpeg()
     fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="whisper_audio_")
     os.close(fd)
+    success = False
     try:
         subprocess.run(
             [
@@ -64,6 +65,7 @@ def extract_audio_from_video(video_path: str) -> Optional[str]:
             timeout=120,
         )
         if os.path.getsize(tmp_path) > 1024:
+            success = True
             return tmp_path
         print("   [Whisper] 提取的音频文件过小，可能视频无音轨")
         return None
@@ -73,6 +75,12 @@ def extract_audio_from_video(video_path: str) -> Optional[str]:
     except Exception as exc:
         print(f"   [Whisper] 音频提取异常: {exc}")
         return None
+    finally:
+        if not success:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def _transcript_cache_dir(output_dir: str) -> str:
@@ -93,6 +101,8 @@ def read_cached_transcript(video_name: str, cache_dir: str) -> Optional[List[Dic
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            return None
         segments = data.get("segments", [])
         if segments and all(isinstance(s, dict) and "start" in s and "end" in s and "text" in s for s in segments):
             return segments
