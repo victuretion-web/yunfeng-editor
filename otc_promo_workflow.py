@@ -1992,94 +1992,94 @@ def create_otc_promo_video(
                             payload={"material_path": material.get("path", ""), "track_name": "02_B_Roll"},
                         )
 
-            if is_review_version:
-                # 3. 添加广审素材轨道 (Ad Review)
-                print("   添加广审素材轨道...")
-                project.script.add_track(draft.TrackType.video, "05_Ad_Review", absolute_index=99999)
-                try:
-                    ad_added = False
-                    local_ad_files = []
-                    if AD_REVIEW_DIR and os.path.isdir(AD_REVIEW_DIR):
-                        for ext in ('*.png', '*.jpg', '*.jpeg', '*.mp4', '*.mov'):
-                            local_ad_files.extend(glob.glob(os.path.join(AD_REVIEW_DIR, ext)))
+            ad_added = False
+            sticker_added = False
 
+            # 3. 添加广审素材轨道 (Ad Review)
+            print("   添加广审素材轨道...")
+            project.script.add_track(draft.TrackType.video, "05_Ad_Review", absolute_index=99999)
+            try:
+                local_ad_files = []
+                if AD_REVIEW_DIR and os.path.isdir(AD_REVIEW_DIR):
+                    for ext in ('*.png', '*.jpg', '*.jpeg', '*.mp4', '*.mov'):
+                        local_ad_files.extend(glob.glob(os.path.join(AD_REVIEW_DIR, ext)))
+
+                if tracker:
+                    local_ad_files = tracker.filter_available(local_ad_files, "ad_review")
+
+                if local_ad_files:
+                    chosen_ad = random.choice(local_ad_files)
                     if tracker:
-                        local_ad_files = tracker.filter_available(local_ad_files, "ad_review")
+                        tracker.record(chosen_ad)
 
-                    if local_ad_files:
-                        chosen_ad = random.choice(local_ad_files)
-                        if tracker:
-                            tracker.record(chosen_ad)
-
-                        ad_seg = project.add_media_safe(
-                            chosen_ad,
-                            start_time="0s",
-                            duration=f"{speech_duration}s",
-                            track_name="05_Ad_Review"
-                        )
-                        if ad_seg:
-                            ad_seg.clip_settings = draft.ClipSettings(transform_y=0.0, scale_x=1.0, scale_y=1.0, alpha=1.0)
-                            ad_added = True
-                            print(f"   [OK] 使用广审素材: {os.path.basename(chosen_ad)}, 已设置100%全覆盖居中")
-                    if not ad_added:
-                        _report_runtime_message(
-                            "timeline_ad_review",
-                            "广审素材未添加（未找到有效文件或已达到使用上限）",
-                            level="SKIP",
-                            payload={"speech_video": speech_video, "ad_review_dir": AD_REVIEW_DIR},
-                        )
-                except Exception as e:
+                    ad_seg = project.add_media_safe(
+                        chosen_ad,
+                        start_time="0s",
+                        duration=f"{speech_duration}s",
+                        track_name="05_Ad_Review"
+                    )
+                    if ad_seg:
+                        ad_seg.clip_settings = draft.ClipSettings(transform_y=0.0, scale_x=1.0, scale_y=1.0, alpha=1.0)
+                        ad_added = True
+                        print(f"   [OK] 使用广审素材: {os.path.basename(chosen_ad)}, 已设置100%全覆盖居中")
+                if not ad_added:
                     _report_runtime_message(
                         "timeline_ad_review",
-                        f"广审轨道添加失败: {e}",
+                        "广审素材未添加（未找到有效文件或已达到使用上限）",
                         level="SKIP",
                         payload={"speech_video": speech_video, "ad_review_dir": AD_REVIEW_DIR},
-                        exc=e,
                     )
+            except Exception as e:
+                _report_runtime_message(
+                    "timeline_ad_review",
+                    f"广审轨道添加失败: {e}",
+                    level="SKIP",
+                    payload={"speech_video": speech_video, "ad_review_dir": AD_REVIEW_DIR},
+                    exc=e,
+                )
 
-                # 4. 添加顶部贴图素材 (Top Sticker)
-                print("   添加顶部贴图素材...")
-                project.script.add_track(draft.TrackType.video, "06_Top_Sticker", absolute_index=99998)
-                try:
-                    sticker_added = False
-                    local_sticker_files = []
-                    if STICKER_DIR and os.path.isdir(STICKER_DIR):
-                        for ext in ('*.png', '*.jpg', '*.jpeg', '*.mp4', '*.mov'):
-                            local_sticker_files.extend(glob.glob(os.path.join(STICKER_DIR, ext)))
+            # 4. 添加顶部贴图素材 (Top Sticker)
+            print("   添加顶部贴图素材...")
+            project.script.add_track(draft.TrackType.video, "06_Top_Sticker", absolute_index=99998)
+            try:
+                local_sticker_files = []
+                if STICKER_DIR and os.path.isdir(STICKER_DIR):
+                    for ext in ('*.png', '*.jpg', '*.jpeg', '*.mp4', '*.mov'):
+                        local_sticker_files.extend(glob.glob(os.path.join(STICKER_DIR, ext)))
 
+                if tracker:
+                    local_sticker_files = tracker.filter_available(local_sticker_files, "sticker")
+
+                if local_sticker_files:
+                    chosen_sticker = random.choice(local_sticker_files)
                     if tracker:
-                        local_sticker_files = tracker.filter_available(local_sticker_files, "sticker")
+                        tracker.record(chosen_sticker)
 
-                    if local_sticker_files:
-                        chosen_sticker = random.choice(local_sticker_files)
-                        if tracker:
-                            tracker.record(chosen_sticker)
-
-                        sticker_seg = project.add_media_safe(
-                            chosen_sticker,
-                            start_time="0s",
-                            duration=f"{speech_duration}s",
-                            track_name="06_Top_Sticker"
-                        )
-                        if sticker_seg:
-                            sticker_seg.clip_settings = draft.ClipSettings(transform_y=0.0, scale_x=1.0, scale_y=1.0, alpha=1.0)
-                            sticker_added = True
-                            print(f"   [OK] 使用贴图素材: {os.path.basename(chosen_sticker)}, 已设置100%全覆盖居中")
-                    if not sticker_added:
-                        _report_runtime_message(
-                            "timeline_sticker",
-                            "贴图素材未添加（未找到有效文件或已达到使用上限）",
-                            level="SKIP",
-                            payload={"speech_video": speech_video, "sticker_dir": STICKER_DIR},
-                        )
-                except Exception as e:
+                    sticker_seg = project.add_media_safe(
+                        chosen_sticker,
+                        start_time="0s",
+                        duration=f"{speech_duration}s",
+                        track_name="06_Top_Sticker"
+                    )
+                    if sticker_seg:
+                        sticker_seg.clip_settings = draft.ClipSettings(transform_y=0.0, scale_x=1.0, scale_y=1.0, alpha=1.0)
+                        sticker_added = True
+                        print(f"   [OK] 使用贴图素材: {os.path.basename(chosen_sticker)}, 已设置100%全覆盖居中")
+                if not sticker_added:
                     _report_runtime_message(
                         "timeline_sticker",
-                        f"贴图添加失败: {e}",
+                        "贴图素材未添加（未找到有效文件或已达到使用上限）",
                         level="SKIP",
                         payload={"speech_video": speech_video, "sticker_dir": STICKER_DIR},
-                        exc=e,
                     )
+            except Exception as e:
+                _report_runtime_message(
+                    "timeline_sticker",
+                    f"贴图添加失败: {e}",
+                    level="SKIP",
+                    payload={"speech_video": speech_video, "sticker_dir": STICKER_DIR},
+                    exc=e,
+                )
 
             # 5. 添加背景音乐轨道（BGM）
             print(f"   添加背景音乐轨道 (强制用户素材)...")
@@ -2257,12 +2257,13 @@ def create_otc_promo_video(
             {"track_id": 1, "name": "01_Main_Video", "content": "主视频内容", "duration": speech_duration},
             {"track_id": 2, "name": "02_B_Roll", "content": "中插素材", "count": len(matches), "total_duration": total_insert},
         ]
-        if is_review_version:
-            track_hierarchy.extend(
-                [
-                    {"track_id": 3, "name": "05_Ad_Review", "content": "广审文件", "duration": speech_duration, "is_full_duration": True, "opacity": "100%", "position": "bottom_10%"},
-                    {"track_id": 4, "name": "06_Top_Sticker", "content": "顶部贴图", "duration": speech_duration, "is_full_duration": True, "opacity": "100%", "position": "top_10%"},
-                ]
+        if ad_added:
+            track_hierarchy.append(
+                {"track_id": 3, "name": "05_Ad_Review", "content": "广审文件", "duration": speech_duration, "is_full_duration": True, "opacity": "100%", "position": "bottom_10%"}
+            )
+        if sticker_added:
+            track_hierarchy.append(
+                {"track_id": 4, "name": "06_Top_Sticker", "content": "顶部贴图", "duration": speech_duration, "is_full_duration": True, "opacity": "100%", "position": "top_10%"}
             )
         
         # 写入 JSON 报告用于审核

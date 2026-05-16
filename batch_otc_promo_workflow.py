@@ -145,7 +145,7 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
             sfx_list=sfx_list,
             bgm_emotion=bgm_emotion,
             tracker=tracker,
-            is_review_version=False
+            is_review_version=True
         )
         result['status'] = '成功' if success else '失败'
         if not success:
