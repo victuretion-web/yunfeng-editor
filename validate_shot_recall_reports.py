@@ -17,13 +17,14 @@ def _load_jsonl(path: str) -> List[Dict]:
     if not os.path.exists(path):
         return rows
     with open(path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 rows.append(json.loads(line))
-            except Exception:
+            except json.JSONDecodeError as exc:
+                print(f"[WARN] 跳过损坏的 JSONL 行 {line_no}: {os.path.basename(path)} ({exc})")
                 continue
     return rows
 
@@ -43,6 +44,7 @@ def build_summary(limit: int = 12) -> Dict[str, object]:
     fallback_counter: Counter = Counter()
     trigger_counter: Counter = Counter()
     source_counter: Counter = Counter()
+    quality_counter: Counter = Counter()
     per_video: List[Dict[str, object]] = []
     shot_selected_total = 0
     selection_total = 0
@@ -61,11 +63,13 @@ def build_summary(limit: int = 12) -> Dict[str, object]:
             fallback_level = str(row.get("fallback_level", "")).strip() or "unknown"
             is_shot = bool(row.get("is_shot_material")) or fallback_level.endswith("_shot")
             trigger_reason = str(row.get("trigger_reason", "")).strip() or "unknown"
+            match_quality = str(row.get("match_quality", "")).strip() or "unknown"
             semantic_score = float(row.get("semantic_score", 0.0) or 0.0)
 
             fallback_counter[fallback_level] += 1
             trigger_counter[trigger_reason] += 1
             source_counter["shot" if is_shot else "full_video"] += 1
+            quality_counter[match_quality] += 1
             video_counter[fallback_level] += 1
             selection_total += 1
 
@@ -95,6 +99,7 @@ def build_summary(limit: int = 12) -> Dict[str, object]:
                 "shot_selected_count": video_shot_selected,
                 "shot_selected_ratio": round(video_shot_selected / len(selected), 4) if selected else 0.0,
                 "fallback_levels": dict(video_counter),
+                "match_quality": dict(Counter(str(row.get("match_quality", "")).strip() or "unknown" for row in selected)),
                 "shot_recall_initialized": shot_init[-1] if shot_init else {},
                 "shot_examples": shot_examples.get(os.path.basename(path), []),
             }
@@ -106,6 +111,7 @@ def build_summary(limit: int = 12) -> Dict[str, object]:
         "shot_selected_total": shot_selected_total,
         "shot_selected_ratio": round(shot_selected_total / selection_total, 4) if selection_total else 0.0,
         "fallback_levels": dict(fallback_counter),
+        "match_quality": dict(quality_counter),
         "trigger_reasons": dict(trigger_counter),
         "selection_sources": dict(source_counter),
         "avg_shot_score": round(sum(shot_score_values) / len(shot_score_values), 4) if shot_score_values else 0.0,

@@ -85,7 +85,9 @@ class JyProject(JyProjectBase, MediaOpsMixin, TextOpsMixin, VfxOpsMixin, Mocking
                 # 更新 tm_duration 防止被清理脚本误删 (注意：单位必须是微秒！)
                 if hasattr(self.script, "duration"):
                     draft_meta["tm_duration"] = int(self.script.duration)
-                    if draft_meta["tm_duration"] < 1000000 and draft_meta["tm_duration"] > 0:
+                    # duration 若以秒为单位（< 3600 且 > 0）需要转换为微秒；
+                    # 若已经是微秒级（>= 1_000_000）则无需转换。
+                    if 0 < draft_meta["tm_duration"] < 3600:
                         draft_meta["tm_duration"] *= 1000000
                 
                 # 更新修改时间

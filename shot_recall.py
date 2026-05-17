@@ -1,15 +1,17 @@
+import math
 import os
+from collections import Counter
 from typing import Dict, List, Optional, Sequence
 
 try:
     from sentence_transformers import SentenceTransformer
-except Exception:
+except ImportError:
     SentenceTransformer = None
 
 try:
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
-except Exception:
+except ImportError:
     TfidfVectorizer = None
     cosine_similarity = None
 
@@ -23,7 +25,7 @@ _SENTENCE_MODEL_ATTEMPTED = False
 def _safe_float(value: object, default: float = 0.0) -> float:
     try:
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
@@ -182,6 +184,81 @@ def _candidate_recall_query(candidate: Dict[str, object]) -> str:
     )
 
 
+def _char_wb_ngrams(text: str, min_n: int = 2, max_n: int = 4) -> List[str]:
+    padded = f" {str(text or '').strip()} "
+    ngrams: List[str] = []
+    for size in range(min_n, max_n + 1):
+        if len(padded) < size:
+            continue
+        for idx in range(len(padded) - size + 1):
+            ngrams.append(padded[idx: idx + size])
+    return ngrams
+
+
+def _build_lightweight_tfidf_index(texts: Sequence[str]) -> Dict[str, object]:
+    doc_vectors: List[Dict[str, float]] = []
+    doc_norms: List[float] = []
+    doc_freq: Counter[str] = Counter()
+    tokenized_docs: List[List[str]] = []
+    total_docs = max(1, len(texts))
+
+    for text in texts:
+        tokens = _char_wb_ngrams(str(text or ""))
+        tokenized_docs.append(tokens)
+        doc_freq.update(set(tokens))
+
+    idf_map = {
+        token: math.log((1.0 + total_docs) / (1.0 + freq)) + 1.0
+        for token, freq in doc_freq.items()
+    }
+
+    for tokens in tokenized_docs:
+        token_counts = Counter(tokens)
+        total_terms = max(1, sum(token_counts.values()))
+        vector = {
+            token: (count / total_terms) * idf_map[token]
+            for token, count in token_counts.items()
+            if token in idf_map
+        }
+        norm = math.sqrt(sum(value * value for value in vector.values()))
+        doc_vectors.append(vector)
+        doc_norms.append(norm)
+
+    return {
+        "backend": "tfidf",
+        "idf_map": idf_map,
+        "vectors": doc_vectors,
+        "norms": doc_norms,
+    }
+
+
+def _query_lightweight_tfidf(index: Dict[str, object], query: str) -> List[float]:
+    idf_map = dict(index.get("idf_map") or {})
+    doc_vectors = list(index.get("vectors") or [])
+    doc_norms = list(index.get("norms") or [])
+    query_counts = Counter(_char_wb_ngrams(query))
+    total_terms = max(1, sum(query_counts.values()))
+    query_vector = {
+        token: (count / total_terms) * idf_map[token]
+        for token, count in query_counts.items()
+        if token in idf_map
+    }
+    query_norm = math.sqrt(sum(value * value for value in query_vector.values()))
+    if query_norm <= 0:
+        return [0.0 for _ in doc_vectors]
+
+    scores: List[float] = []
+    for idx, doc_vector in enumerate(doc_vectors):
+        doc_norm = doc_norms[idx] if idx < len(doc_norms) else 0.0
+        if doc_norm <= 0:
+            scores.append(0.0)
+            continue
+        overlap = set(query_vector.keys()) & set(doc_vector.keys())
+        dot_product = sum(query_vector[token] * doc_vector[token] for token in overlap)
+        scores.append(dot_product / (query_norm * doc_norm))
+    return scores
+
+
 def _load_sentence_model() -> Optional[SentenceTransformer]:
     global _SENTENCE_MODEL
     global _SENTENCE_MODEL_ATTEMPTED
@@ -199,6 +276,11 @@ def _load_sentence_model() -> Optional[SentenceTransformer]:
     for model_name in model_names:
         try:
             _SENTENCE_MODEL = SentenceTransformer(model_name, device="cpu", local_files_only=True)
+            return _SENTENCE_MODEL
+        except Exception:
+            pass
+        try:
+            _SENTENCE_MODEL = SentenceTransformer(model_name, device="cpu")
             return _SENTENCE_MODEL
         except Exception:
             continue
@@ -345,8 +427,8 @@ def build_recall_index(materials: Sequence[Dict[str, object]]) -> Dict[str, obje
                 "model": model,
                 "matrix": matrix,
             }
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[WARN] SentenceTransformer 编码失败，已回退 TF-IDF: {exc}")
 
     if TfidfVectorizer is not None and cosine_similarity is not None:
         vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4))
@@ -359,10 +441,13 @@ def build_recall_index(materials: Sequence[Dict[str, object]]) -> Dict[str, obje
             "matrix": matrix,
         }
 
+    print("[WARN] sklearn 不可用，已回退 TF-IDF（内置轻量实现）。")
+    lightweight_index = _build_lightweight_tfidf_index(texts)
     return {
-        "backend": "none",
+        "backend": "tfidf",
         "materials": prepared_materials,
         "texts": texts,
+        **lightweight_index,
     }
 
 
@@ -385,8 +470,11 @@ def query_recall_index(index: Dict[str, object], query: str, n: int = 24) -> Lis
     elif backend == "tfidf":
         vectorizer = index.get("vectorizer")
         matrix = index.get("matrix")
-        query_vector = vectorizer.transform([query])
-        scores = list(cosine_similarity(query_vector, matrix)[0])
+        if vectorizer is not None and matrix is not None and cosine_similarity is not None:
+            query_vector = vectorizer.transform([query])
+            scores = list(cosine_similarity(query_vector, matrix)[0])
+        else:
+            scores = _query_lightweight_tfidf(index, query)
     else:
         query_tokens = set(query.split())
         for text in index.get("texts", []):

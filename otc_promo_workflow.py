@@ -51,6 +51,7 @@ from draft_registry import (
     get_draft_root,
     get_official_draft_root,
     is_portable_draft_root,
+    normalize_draft_mode,
     reconcile_root_meta,
     sync_managed_drafts,
 )
@@ -331,6 +332,28 @@ def _report_runtime_message(
         _append_runtime_issue(stage, message, exc=exc, payload=payload)
 
 
+def _is_directory_writable(path: str) -> bool:
+    path = str(path or "").strip()
+    if not path:
+        return False
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe_path = os.path.join(path, "draft_write_probe.tmp")
+        with open(probe_path, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe_path)
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_preferred_draft_root() -> str:
+    official_root = get_official_draft_root()
+    if official_root and _is_directory_writable(official_root):
+        return official_root
+    return get_draft_root()
+
+
 def _probe_media_dimensions(filepath: str) -> Tuple[int, int]:
     try:
         result = run_hidden(
@@ -429,30 +452,51 @@ def _has_semantic_material_signals(item: Dict) -> bool:
 
 
 def _validate_tagged_material_pool(videos: List[Dict], pool_name: str, semantic_type: str):
-    qualified = [
+    usable = [
         item for item in videos
-        if float(item.get("duration", 0.0)) >= POOL_MIN_DURATION
-        and float(item.get("duration", 0.0)) <= POOL_MAX_DURATION
-        and bool(item.get("is_vertical"))
+        if float(item.get("duration", 0.0)) >= 1.0
         and _has_semantic_material_signals(item)
     ]
-    if len(qualified) < POOL_MIN_COUNT:
+    preferred = [
+        item for item in usable
+        if float(item.get("duration", 0.0)) >= POOL_MIN_DURATION
+        and float(item.get("duration", 0.0)) <= max(POOL_MAX_DURATION, 12.0)
+        and bool(item.get("is_vertical"))
+    ]
+    if len(usable) < POOL_MIN_COUNT:
         _report_runtime_message(
             "material_pool_validation",
-            f"{pool_name}当前满足标准的素材不足 {POOL_MIN_COUNT} 条，仅检测到 {len(qualified)} 条，系统将继续生成但建议尽快补足。",
+            f"{pool_name}当前可用素材不足 {POOL_MIN_COUNT} 条，共检测到 {len(usable)} 条，其中优先适配 {len(preferred)} 条，系统将继续生成但建议尽快补足。",
             level="WARN",
-            payload={"pool_name": pool_name, "qualified_count": len(qualified), "required_count": POOL_MIN_COUNT},
+            payload={
+                "pool_name": pool_name,
+                "usable_count": len(usable),
+                "preferred_count": len(preferred),
+                "required_count": POOL_MIN_COUNT,
+            },
         )
 
     report = {
         "pool_name": pool_name,
         "semantic_type": semantic_type,
         "required_count": POOL_MIN_COUNT,
-        "qualified_count": len(qualified),
-        "qualified_examples": [os.path.basename(item["path"]) for item in qualified[:10]],
-        "auto_tagged_count": sum(1 for item in qualified if item.get("auto_tags")),
+        "qualified_count": len(usable),
+        "preferred_count": len(preferred),
+        "qualified_examples": [os.path.basename(item["path"]) for item in usable[:10]],
+        "preferred_examples": [os.path.basename(item["path"]) for item in preferred[:10]],
+        "auto_tagged_count": sum(1 for item in usable if item.get("auto_tags")),
     }
     return report
+
+
+def _collect_overlay_material_files(directory: str) -> List[str]:
+    directory = str(directory or "").strip()
+    if not directory or not os.path.isdir(directory):
+        return []
+    collected: List[str] = []
+    for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.mp4", "*.mov"):
+        collected.extend(glob.glob(os.path.join(directory, "**", pattern), recursive=True))
+    return sorted({os.path.abspath(path) for path in collected if os.path.isfile(path)})
 
 
 def detect_jianying_version() -> Optional[str]:
@@ -606,6 +650,8 @@ def build_runtime_preflight_report() -> Dict[str, object]:
         "draft_root": draft_root,
         "official_draft_root": official_root,
         "using_portable_draft_root": is_portable_draft_root(draft_root),
+        "requested_draft_mode": normalize_draft_mode(),
+        "draft_root_override": os.environ.get("OTC_DRAFT_ROOT", "").strip(),
         "localappdata": os.environ.get("LOCALAPPDATA", ""),
         "skill_wrapper_exists": os.path.exists(skill_wrapper_path),
         "ffmpeg_path": ffmpeg_path,
@@ -618,7 +664,7 @@ def build_runtime_preflight_report() -> Dict[str, object]:
 
     try:
         os.makedirs(draft_root, exist_ok=True)
-        probe_path = os.path.join(draft_root, ".draft_write_probe.tmp")
+        probe_path = os.path.join(draft_root, "draft_write_probe.tmp")
         with open(probe_path, "w", encoding="utf-8") as f:
             f.write("ok")
         os.remove(probe_path)
@@ -640,9 +686,28 @@ def build_runtime_preflight_report() -> Dict[str, object]:
         report["fatal_errors"].append("未找到 ffprobe，可执行文件未正确打包或被拦截。")
 
     if report["checks"]["using_portable_draft_root"]:
-        report["warnings"].append(
-            f"当前未使用系统剪映草稿目录，已回退到便携草稿目录: {draft_root}"
-        )
+        portable_message = f"当前未使用系统剪映草稿目录，已回退到便携草稿目录: {draft_root}"
+        report["warnings"].append(portable_message)
+        official_reason = ""
+        if official_root:
+            probe_path = os.path.join(official_root, "draft_write_probe.tmp")
+            try:
+                os.makedirs(official_root, exist_ok=True)
+                with open(probe_path, "w", encoding="utf-8") as f:
+                    f.write("ok")
+                os.remove(probe_path)
+            except Exception as exc:
+                official_reason = f"（原因：{exc}）"
+        if detected_version:
+            report["warnings"].append(
+                f"已检测到剪映 {detected_version}，但系统草稿目录不可写{official_reason}。"
+                f"生成完成后可手动同步到剪映草稿目录。"
+            )
+        else:
+            report["warnings"].append(
+                f"未检测到剪映安装，将使用便携草稿目录。"
+                f"如需在剪映中直接打开，请安装剪映专业版后重试。"
+            )
 
     if not detected_version:
         report["warnings"].append("未检测到剪映版本，将继续生成草稿，但无法保证可直接在剪映中显示。")
@@ -970,9 +1035,9 @@ def _resolve_primary_thresholds(candidate: Dict) -> List[Tuple[str, float]]:
     if intent == "symptom_scenario":
         relaxed_threshold = min(relaxed_threshold, 0.63)
     elif intent == "product_effect":
-        relaxed_threshold = min(relaxed_threshold, 0.60)
+        relaxed_threshold = min(relaxed_threshold, 0.68)
     elif intent == "product_usage":
-        relaxed_threshold = min(relaxed_threshold, 0.50)
+        relaxed_threshold = min(relaxed_threshold, 0.64)
 
     thresholds: List[Tuple[str, float]] = [("semantic_primary", base_threshold)]
     if relaxed_threshold < base_threshold:
@@ -1364,6 +1429,60 @@ def _select_user_bgm_file(user_bgm_dir: str) -> str:
         random.shuffle(bgm_files)
     return bgm_files[0]
 
+
+def _plan_to_candidates(plan: Optional[Dict], trigger_reason: str) -> List[Dict]:
+    candidates: List[Dict] = []
+    if not plan:
+        return candidates
+    for b in plan.get("b_rolls", []):
+        start_time = float(b.get("start", 0))
+        end_time = float(b.get("end", 0))
+        semantic_type = b.get("type", "symptom")
+        if end_time - start_time < 0.5:
+            continue
+        candidates.append({
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration": round(end_time - start_time, 3),
+            "semantic_type": semantic_type,
+            "text": b.get("reason", "语义中插"),
+            "is_transition": False,
+            "trigger_reason": trigger_reason,
+            "trigger_keyword": str(b.get("keyword", "")).strip() or None,
+            "emotion_strength": str(b.get("emotion_strength", "medium")),
+            "intent": b.get("intent", ""),
+            "action_type": b.get("action_type", ""),
+            "scene_hint": b.get("scene_hint", ""),
+            "entities": b.get("entities", []),
+        })
+    return candidates
+
+
+def _merge_non_overlapping_candidates(
+    primary_candidates: List[Dict],
+    supplement_candidates: List[Dict],
+    min_overlap_seconds: float = 0.5,
+) -> List[Dict]:
+    merged = list(primary_candidates)
+    existing_spans = [
+        (float(candidate["start_time"]), float(candidate["end_time"]))
+        for candidate in merged
+    ]
+    for candidate in supplement_candidates:
+        start_time = float(candidate["start_time"])
+        end_time = float(candidate["end_time"])
+        conflict = False
+        for existing_start, existing_end in existing_spans:
+            if min(end_time, existing_end) - max(start_time, existing_start) > min_overlap_seconds:
+                conflict = True
+                break
+        if conflict:
+            continue
+        merged.append(candidate)
+        existing_spans.append((start_time, end_time))
+    merged.sort(key=lambda item: float(item["start_time"]))
+    return merged
+
 def _build_time_based_broll_candidates(
     video_duration: float,
     sensitivity: str,
@@ -1551,6 +1670,23 @@ def smart_material_matching(
         except Exception as e:
             print(f"   [Whisper] 转写阶段异常，降级: {e}")
 
+    if transcript_segments:
+        try:
+            import llm_clip_matcher
+            keyword_plan = llm_clip_matcher.plan_insertions_with_keywords(
+                transcript_segments=transcript_segments,
+                video_duration=video_duration,
+                density_config=density_template,
+            )
+            if keyword_plan and keyword_plan.get("b_rolls"):
+                print("   [INFO] 使用关键词锚点优先规划中插...")
+                candidate_matches = _plan_to_candidates(keyword_plan, "keyword_plan")
+                sfx_list = keyword_plan.get("sfx", []) or sfx_list
+                bgm_emotion = keyword_plan.get("bgm_emotion", bgm_emotion)
+        except Exception as e:
+            print(f"   [WARN] 关键词规则规划失败: {e}")
+
+    llm_candidates: List[Dict] = []
     if llm_api_key:
         try:
             import llm_clip_matcher
@@ -1572,28 +1708,9 @@ def smart_material_matching(
                     density_config=density_template,
                 )
             if plan:
-                print("   [LLM] 成功获取大模型语义剧本，开始组装素材...")
-                for b in plan.get("b_rolls", []):
-                    start_time = float(b.get("start", 0))
-                    end_time = float(b.get("end", 0))
-                    semantic_type = b.get("type", "symptom")
-                    if end_time - start_time < 0.5:
-                        continue
-                    candidate_matches.append({
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "duration": round(end_time - start_time, 3),
-                        "semantic_type": semantic_type,
-                        "text": b.get("reason", "LLM中插"),
-                        "is_transition": False,
-                        "trigger_reason": "llm_plan",
-                        "emotion_strength": str(b.get("emotion_strength", "medium")),
-                        "intent": b.get("intent", ""),
-                        "action_type": b.get("action_type", ""),
-                        "scene_hint": b.get("scene_hint", ""),
-                        "entities": b.get("entities", []),
-                    })
-                sfx_list = plan.get("sfx", [])
+                print("   [LLM] 成功获取大模型语义剧本，作为关键词锚点的补充...")
+                llm_candidates = _plan_to_candidates(plan, "llm_plan")
+                sfx_list = plan.get("sfx", []) or sfx_list
                 bgm_emotion = plan.get("bgm_emotion", "neutral")
         except Exception as e:
             print(f"   [LLM Error] 大模型处理异常: {e}，回退到时间驱动匹配。")
@@ -1607,38 +1724,10 @@ def smart_material_matching(
         video_id=video_id,
     )
 
-    if not candidate_matches and transcript_segments:
-        try:
-            import llm_clip_matcher
-            keyword_plan = llm_clip_matcher.plan_insertions_with_keywords(
-                transcript_segments=transcript_segments,
-                video_duration=video_duration,
-                density_config=density_template,
-            )
-            if keyword_plan and keyword_plan.get("b_rolls"):
-                print("   [INFO] 使用关键词规则基于口播转写规划中插...")
-                for b in keyword_plan["b_rolls"]:
-                    start_time = float(b.get("start", 0))
-                    end_time = float(b.get("end", 0))
-                    semantic_type = b.get("type", "symptom")
-                    if end_time - start_time < 0.5:
-                        continue
-                    candidate_matches.append({
-                        "start_time": start_time,
-                        "end_time": end_time,
-                        "duration": round(end_time - start_time, 3),
-                        "semantic_type": semantic_type,
-                        "text": b.get("reason", "关键词中插"),
-                        "is_transition": False,
-                        "trigger_reason": "keyword_plan",
-                        "emotion_strength": "medium",
-                        "intent": "",
-                        "action_type": "",
-                        "scene_hint": "",
-                        "entities": [],
-                    })
-        except Exception as e:
-            print(f"   [WARN] 关键词规则规划失败: {e}")
+    if candidate_matches and llm_candidates:
+        candidate_matches = _merge_non_overlapping_candidates(candidate_matches, llm_candidates)
+    elif llm_candidates:
+        candidate_matches = llm_candidates
 
     if not candidate_matches:
         print("   [INFO] 使用时间驱动策略规划中插...")
@@ -1648,19 +1737,7 @@ def smart_material_matching(
         llm_ratio = llm_total / video_duration if video_duration > 0 else 0.0
         if llm_ratio < TARGET_BROLL_COVERAGE_RATIO:
             print(f"   [INFO] LLM 中插占比 {llm_ratio:.1%} 不足目标 {TARGET_BROLL_COVERAGE_RATIO:.0%}，补充时间驱动候选...")
-            existing_spans = [(float(c["start_time"]), float(c["end_time"])) for c in candidate_matches]
-            for tc in time_based_candidates:
-                tc_start = float(tc["start_time"])
-                tc_end = float(tc["end_time"])
-                conflict = False
-                for es, ee in existing_spans:
-                    if min(tc_end, ee) - max(tc_start, es) > 0.5:
-                        conflict = True
-                        break
-                if not conflict:
-                    candidate_matches.append(tc)
-                    existing_spans.append((tc_start, tc_end))
-            candidate_matches.sort(key=lambda x: float(x["start_time"]))
+            candidate_matches = _merge_non_overlapping_candidates(candidate_matches, time_based_candidates)
 
     density_windows = analyze_insert_density(
         candidate_matches,
@@ -1908,7 +1985,7 @@ def create_otc_promo_video(
                 f"调整 {broll_stats['shifted_count']} 条, 丢弃 {broll_stats['dropped_count']} 条"
             )
         
-        draft_root = get_draft_root()
+        draft_root = _resolve_preferred_draft_root()
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         draft_lock_path = os.path.join(OUTPUT_DIR, ".otc_draft_write.lock")
 
@@ -1927,7 +2004,7 @@ def create_otc_promo_video(
             )
 
             if is_review_version:
-                project.script.add_track(draft.TrackType.video, "07_Review_Watermark", absolute_index=30000)
+                project.script.add_track(draft.TrackType.text, "07_Review_Watermark", absolute_index=30000)
                 project.add_text_simple(
                     text="【审查版本】对齐与时码校验",
                     start_time="0s",
@@ -1999,10 +2076,7 @@ def create_otc_promo_video(
             print("   添加广审素材轨道...")
             project.script.add_track(draft.TrackType.video, "05_Ad_Review", absolute_index=99999)
             try:
-                local_ad_files = []
-                if AD_REVIEW_DIR and os.path.isdir(AD_REVIEW_DIR):
-                    for ext in ('*.png', '*.jpg', '*.jpeg', '*.mp4', '*.mov'):
-                        local_ad_files.extend(glob.glob(os.path.join(AD_REVIEW_DIR, ext)))
+                local_ad_files = _collect_overlay_material_files(AD_REVIEW_DIR)
 
                 if tracker:
                     local_ad_files = tracker.filter_available(local_ad_files, "ad_review")
@@ -2042,10 +2116,7 @@ def create_otc_promo_video(
             print("   添加顶部贴图素材...")
             project.script.add_track(draft.TrackType.video, "06_Top_Sticker", absolute_index=99998)
             try:
-                local_sticker_files = []
-                if STICKER_DIR and os.path.isdir(STICKER_DIR):
-                    for ext in ('*.png', '*.jpg', '*.jpeg', '*.mp4', '*.mov'):
-                        local_sticker_files.extend(glob.glob(os.path.join(STICKER_DIR, ext)))
+                local_sticker_files = _collect_overlay_material_files(STICKER_DIR)
 
                 if tracker:
                     local_sticker_files = tracker.filter_available(local_sticker_files, "sticker")
@@ -2295,7 +2366,7 @@ def create_otc_promo_video(
                 "framerate": "25 fps",
                 "bitrate": ">= 8 Mbps",
                 "audio": "48 kHz / 16-bit Stereo",
-                "delivery": ["干净版", "带时间码审查版", "对齐报告CSV"]
+                "delivery": ["单草稿", "审查报告JSON"]
             },
             "statistics": {
                 "host_face_duration": f"{speech_visible:.2f}s",
@@ -2542,7 +2613,7 @@ def main():
         sfx_list=sfx_list,
         bgm_emotion=bgm_emotion,
         tracker=tracker,
-        is_review_version=False
+        is_review_version=False,
     )
 
     if success:

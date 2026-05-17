@@ -78,6 +78,28 @@ def get_output_dir() -> str:
     return runtime_path("output")
 
 
+def load_project_dotenv() -> List[str]:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return []
+
+    loaded_paths: List[str] = []
+    candidates = [
+        os.path.join(get_runtime_base_dir(), ".env"),
+        os.path.join(get_resource_base_dir(), ".env"),
+    ]
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.abspath(candidate)
+        if normalized in seen or not os.path.exists(normalized):
+            continue
+        seen.add(normalized)
+        load_dotenv(normalized, override=False)
+        loaded_paths.append(normalized)
+    return loaded_paths
+
+
 
 def ensure_skill_scripts_on_path() -> str:
     skill_root = get_skill_root()
@@ -117,6 +139,19 @@ def get_worker_command(extra_args: Optional[Iterable[str]] = None) -> List[str]:
 
 def build_runtime_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     env = dict(base_env or os.environ)
+    if not env.get("LOCALAPPDATA", "").strip():
+        user_profile = env.get("USERPROFILE", "").strip()
+        home_drive = env.get("HOMEDRIVE", "").strip()
+        home_path = env.get("HOMEPATH", "").strip()
+        fallback_home = ""
+        if user_profile:
+            fallback_home = user_profile
+        elif home_drive and home_path:
+            fallback_home = home_drive + home_path
+        elif os.path.expanduser("~"):
+            fallback_home = os.path.expanduser("~")
+        if fallback_home:
+            env["LOCALAPPDATA"] = os.path.join(fallback_home, "AppData", "Local")
     ffmpeg_bin = resource_path("ffmpeg-8.1-essentials_build", "bin")
     if not os.path.isdir(ffmpeg_bin):
         # When frozen, ffmpeg may be under _internal/
@@ -133,6 +168,7 @@ def build_runtime_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, st
 
 
 def configure_current_process() -> Dict[str, str]:
+    load_project_dotenv()
     env = build_runtime_env(os.environ)
     os.environ.update(env)
     ensure_runtime_directories()

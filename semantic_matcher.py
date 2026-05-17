@@ -17,6 +17,8 @@ SEMANTIC_ANCHORS = {
     "product": "__sem_product__",
     "generic": "__sem_generic__",
 }
+GENERIC_SCENE = "generic_scene"
+GENERIC_ACTION = "generic_action"
 
 TOKEN_ALIASES = {
     "prod": ["产品", "__sem_product__"],
@@ -53,12 +55,70 @@ SEMANTIC_KEYWORDS = {
     ],
 }
 
+INTENT_PATTERNS: Dict[str, Dict[str, object]] = {
+    "symptom_appearance": {"semantic_type": "symptom", "keywords": ["红斑", "泛红", "脱屑", "丘疹", "皮损", "斑块", "水泡", "起皮", "粗糙"]},
+    "symptom_feeling": {"semantic_type": "symptom", "keywords": ["瘙痒", "刺痛", "灼热", "难受", "疼", "痒", "发痒", "不舒服"]},
+    "symptom_scenario": {"semantic_type": "symptom", "keywords": ["晚上", "夜里", "白天", "出门", "工作", "睡觉", "社交", "反复", "影响生活", "尴尬"]},
+    "product_form": {"semantic_type": "product", "keywords": ["包装", "膏体", "喷雾", "乳膏", "软膏", "外盒", "瓶身", "质地"]},
+    "product_usage": {"semantic_type": "product", "keywords": ["涂抹", "喷", "使用", "外用", "按说明", "清洗后", "均匀涂开", "坚持使用"]},
+    "product_effect": {"semantic_type": "product", "keywords": ["改善", "缓解", "抑菌", "止痒", "恢复", "修护", "见效", "效果"]},
+    "trust_or_authority": {"semantic_type": "product", "keywords": ["专业", "医生", "药监", "认证", "批准", "成分", "安全", "温和"]},
+    "warning_or_taboo": {"semantic_type": "product", "keywords": ["注意", "禁忌", "避免", "不要", "慎用", "遵医嘱"]},
+    "generic_transition": {"semantic_type": "generic", "keywords": ["同时", "另外", "接下来", "再看", "过渡", "然后"]},
+}
+
+ACTION_PATTERNS = {
+    "scratch_relief": ["抓", "抓挠", "搔抓", "挠"],
+    "apply_ointment": ["涂抹", "抹开", "均匀涂", "外用"],
+    "spray_application": ["喷", "喷雾", "喷上"],
+    "packshot_display": ["包装", "外盒", "瓶身", "质地", "展示"],
+    "skin_closeup": ["局部", "患处", "皮肤", "特写", "近景"],
+    "daily_life_scene": ["睡觉", "工作", "出门", "社交", "走路", "洗澡"],
+}
+
+SCENE_PATTERNS = {
+    "night_home": ["晚上", "夜里", "夜间", "睡觉", "卧室", "床上"],
+    "daily_home": ["家里", "洗澡", "起床", "居家"],
+    "work_social": ["工作", "上班", "开会", "社交", "出门", "约会"],
+    "bathroom_usage": ["洗澡", "清洗", "浴室", "镜子"],
+    "clinical_or_lab": ["医生", "专业", "实验", "检测", "认证"],
+}
+
+CAMERA_SHOT_PATTERNS = {
+    "closeup": ["特写", "局部", "近景", "细节"],
+    "medium": ["中景", "半身", "演示"],
+    "wide": ["全景", "场景", "远景", "环境"],
+}
+
+MOTION_LEVEL_PATTERNS = {
+    "high": ["快切", "动态", "动作", "抓挠", "涂抹", "喷涂"],
+    "medium": ["演示", "移动", "转动", "对比"],
+    "low": ["静物", "包装", "空镜", "摆拍"],
+}
+
+ENTITY_VOCABULARY = {
+    "瘙痒": ["瘙痒", "发痒", "痒"],
+    "泛红": ["泛红", "红斑", "红肿", "发红"],
+    "脱屑": ["脱屑", "掉皮", "起皮", "鳞屑"],
+    "疼痛": ["疼痛", "刺痛", "灼热"],
+    "睡眠": ["睡觉", "夜里", "晚上", "睡眠"],
+    "社交": ["社交", "尴尬", "出门", "见人"],
+    "乳膏": ["乳膏", "软膏", "药膏"],
+    "喷雾": ["喷雾", "喷剂", "喷上"],
+    "成分": ["成分", "抑菌", "修护", "安全"],
+    "涂抹": ["涂抹", "均匀涂开", "外用"],
+}
+
 
 def _normalize_text(text: str) -> str:
     text = str(text or "").lower()
     text = re.sub(r"[\[\]【】()（）_/\-]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _normalize_label(value: str, fallback: str = "") -> str:
+    return _normalize_text(value).replace(" ", "_") or fallback
 
 
 def _extract_chinese_ngrams(text: str, n: int = 2) -> List[str]:
@@ -77,6 +137,26 @@ def _extract_semantic_keywords(text: str) -> Dict[str, List[str]]:
     return hits
 
 
+def _first_pattern_hit(text: str, patterns: Dict[str, List[str]], fallback: str) -> str:
+    for label, keywords in patterns.items():
+        if any(keyword in text for keyword in keywords):
+            return label
+    return fallback
+
+
+def _extract_entities(text: str, semantic_type: str, tags: Optional[Sequence[str]] = None) -> List[str]:
+    combined = " ".join([text] + list(tags or []))
+    entities: List[str] = []
+    for entity, keywords in ENTITY_VOCABULARY.items():
+        if any(keyword in combined for keyword in keywords):
+            entities.append(entity)
+    if not entities:
+        keywords = _extract_semantic_keywords(text)
+        fallback_entities = keywords.get(semantic_type, [])[:4]
+        entities.extend(fallback_entities)
+    return sorted(dict.fromkeys(entities))
+
+
 def infer_semantic_type(text: str, fallback: str = "generic") -> str:
     normalized = _normalize_text(text)
     hits = _extract_semantic_keywords(normalized)
@@ -92,20 +172,120 @@ def infer_semantic_type(text: str, fallback: str = "generic") -> str:
     return fallback
 
 
+def infer_intent(text: str, semantic_type: str = "") -> str:
+    normalized = _normalize_text(text)
+    inferred_type = semantic_type or infer_semantic_type(normalized)
+    best_intent = "generic_transition" if inferred_type == "generic" else f"{inferred_type}_feeling"
+    best_score = -1
+    for intent, payload in INTENT_PATTERNS.items():
+        if payload.get("semantic_type") not in (inferred_type, "generic"):
+            continue
+        score = sum(1 for keyword in payload.get("keywords", []) if keyword in normalized)
+        if score > best_score:
+            best_intent = intent
+            best_score = score
+    if best_score <= 0:
+        if inferred_type == "product":
+            return "product_usage"
+        if inferred_type == "symptom":
+            return "symptom_feeling"
+        return "generic_transition"
+    return best_intent
+
+
+def infer_action_type(text: str, semantic_type: str = "", intent: str = "") -> str:
+    normalized = _normalize_text(text)
+    action = _first_pattern_hit(normalized, ACTION_PATTERNS, GENERIC_ACTION)
+    if action != GENERIC_ACTION:
+        return action
+    if intent == "product_usage":
+        return "apply_ointment" if semantic_type == "product" else GENERIC_ACTION
+    if intent == "product_form":
+        return "packshot_display"
+    if intent.startswith("symptom_"):
+        return "skin_closeup"
+    return GENERIC_ACTION
+
+
+def infer_scene_hint(text: str) -> str:
+    return _first_pattern_hit(_normalize_text(text), SCENE_PATTERNS, GENERIC_SCENE)
+
+
+def infer_camera_shot(text: str, tags: Optional[Sequence[str]] = None) -> str:
+    combined = _normalize_text(" ".join([text] + list(tags or [])))
+    return _first_pattern_hit(combined, CAMERA_SHOT_PATTERNS, "medium")
+
+
+def infer_motion_level(text: str, tags: Optional[Sequence[str]] = None) -> str:
+    combined = _normalize_text(" ".join([text] + list(tags or [])))
+    return _first_pattern_hit(combined, MOTION_LEVEL_PATTERNS, "medium")
+
+
+def infer_visual_need(intent: str, action_type: str) -> str:
+    if action_type == "scratch_relief":
+        return "scratch_relief"
+    if action_type in ("apply_ointment", "spray_application"):
+        return "usage_demonstration"
+    if intent == "product_effect":
+        return "effect_transition"
+    if intent.startswith("symptom_"):
+        return "symptom_highlight"
+    return "generic_support"
+
+
+def build_segment_context_window(text: str, context_prev: str = "", context_next: str = "") -> str:
+    parts = [str(context_prev or "").strip(), str(text or "").strip(), str(context_next or "").strip()]
+    return " | ".join(part for part in parts if part)
+
+
+def _build_quality_score(material: Dict[str, object], tags: Optional[Sequence[str]] = None) -> float:
+    score = 0.68
+    duration = float(material.get("duration", 0.0))
+    if 2.0 <= duration <= 6.5:
+        score += 0.12
+    if bool(material.get("is_vertical")):
+        score += 0.08
+    if len(list(tags or [])) >= 2:
+        score += 0.05
+    shot = infer_camera_shot(str(material.get("filename", "")), tags=tags)
+    if shot == "closeup":
+        score += 0.03
+    return max(0.45, min(0.98, round(score, 4)))
+
+
 def build_semantic_profile(
     text: str,
     semantic_type: str = "",
     tags: Optional[Sequence[str]] = None,
     emotion_strength: str = "medium",
     is_generic: bool = False,
+    context_prev: str = "",
+    context_next: str = "",
+    intent: str = "",
+    action_type: str = "",
+    scene_hint: str = "",
+    entities: Optional[Sequence[str]] = None,
+    camera_shot: str = "",
+    motion_level: str = "",
+    visual_quality: Optional[float] = None,
 ) -> Dict[str, object]:
     normalized = _normalize_text(text)
     inferred_type = semantic_type or infer_semantic_type(normalized)
+    inferred_intent = intent or infer_intent(normalized, inferred_type)
+    inferred_action = action_type or infer_action_type(normalized, inferred_type, inferred_intent)
+    inferred_scene = scene_hint or infer_scene_hint(normalized)
+    inferred_entities = list(entities or _extract_entities(normalized, inferred_type, tags=tags))
+    inferred_camera_shot = camera_shot or infer_camera_shot(normalized, tags=tags)
+    inferred_motion = motion_level or infer_motion_level(normalized, tags=tags)
+    context_text = _normalize_text(build_segment_context_window(normalized, context_prev, context_next))
+    visual_need = infer_visual_need(inferred_intent, inferred_action)
     weights: Counter = Counter()
     keyword_hits = _extract_semantic_keywords(normalized)
     semantic_anchor = SEMANTIC_ANCHORS.get(inferred_type, SEMANTIC_ANCHORS["generic"])
 
-    for token in re.findall(r"[a-z0-9]{2,}", normalized):
+    base_tokens = re.findall(r"[a-z0-9]{2,}", normalized)
+    base_tokens.extend(re.findall(r"[a-z0-9_]{3,}", context_text))
+    for token in base_tokens:
         weights[token] += 1.0
         for alias in TOKEN_ALIASES.get(token, []):
             weights[alias] += 1.4 if alias.startswith("__sem_") else 1.0
@@ -113,7 +293,17 @@ def build_semantic_profile(
         weights[token] += 0.35
     for token in _extract_chinese_ngrams(normalized, n=3):
         weights[token] += 0.2
+    for token in _extract_chinese_ngrams(context_text, n=2):
+        weights[token] += 0.18
     weights[semantic_anchor] += 3.0
+    weights[f"intent:{inferred_intent}"] += 2.8
+    weights[f"action:{inferred_action}"] += 2.2
+    weights[f"scene:{inferred_scene}"] += 1.7
+    weights[f"need:{visual_need}"] += 1.2
+    weights[f"shot:{inferred_camera_shot}"] += 0.8
+    weights[f"motion:{inferred_motion}"] += 0.8
+    for entity in inferred_entities:
+        weights[f"entity:{entity}"] += 1.6
     for semantic_tokens in keyword_hits.values():
         for token in semantic_tokens:
             weights[token] += 2.2
@@ -129,12 +319,51 @@ def build_semantic_profile(
 
     return {
         "semantic_type": inferred_type,
+        "intent": inferred_intent,
+        "action_type": inferred_action,
+        "scene_hint": inferred_scene,
+        "entities": inferred_entities,
+        "visual_need": visual_need,
+        "camera_shot": inferred_camera_shot,
+        "motion_level": inferred_motion,
         "emotion_strength": emotion_strength or "medium",
         "token_weights": dict(weights),
         "keyword_hits": keyword_hits,
         "text": normalized,
+        "context_text": context_text,
         "is_generic": bool(is_generic),
+        "visual_quality": float(visual_quality if visual_quality is not None else 0.75),
     }
+
+
+def build_segment_semantic_script(
+    text: str,
+    semantic_type: str = "",
+    tags: Optional[Sequence[str]] = None,
+    emotion_strength: str = "medium",
+    context_prev: str = "",
+    context_next: str = "",
+    trigger_reason: str = "",
+    intent: str = "",
+    action_type: str = "",
+    scene_hint: str = "",
+    entities: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    profile = build_semantic_profile(
+        text=text,
+        semantic_type=semantic_type,
+        tags=tags,
+        emotion_strength=emotion_strength,
+        is_generic=False,
+        context_prev=context_prev,
+        context_next=context_next,
+        intent=intent,
+        action_type=action_type,
+        scene_hint=scene_hint,
+        entities=entities,
+    )
+    profile["trigger_reason"] = trigger_reason or "semantic"
+    return profile
 
 
 def weighted_jaccard(left: Dict[str, float], right: Dict[str, float]) -> float:
@@ -153,28 +382,104 @@ def weighted_jaccard(left: Dict[str, float], right: Dict[str, float]) -> float:
     return numerator / denominator
 
 
-def compute_semantic_similarity(candidate_profile: Dict[str, object], material_profile: Dict[str, object]) -> float:
+def _semantic_prefix(value: str) -> str:
+    head = str(value or "").split("_", 1)[0]
+    return head or "generic"
+
+
+def _exact_or_prefix_score(left: str, right: str, fallback: float = 0.0, generic_score: float = 0.42) -> float:
+    if not left or not right:
+        return generic_score if (left == right == "") else fallback
+    if left == right:
+        return 1.0
+    if left == "generic" or right == "generic" or left == GENERIC_ACTION or right == GENERIC_ACTION or left == GENERIC_SCENE or right == GENERIC_SCENE:
+        return generic_score
+    if _semantic_prefix(left) == _semantic_prefix(right):
+        return 0.7
+    return fallback
+
+
+def _entity_overlap_score(left: Sequence[str], right: Sequence[str]) -> float:
+    left_set = {str(item).strip() for item in left or [] if str(item).strip()}
+    right_set = {str(item).strip() for item in right or [] if str(item).strip()}
+    if not left_set or not right_set:
+        return 0.25
+    overlap = len(left_set & right_set)
+    union = len(left_set | right_set)
+    return overlap / union if union else 0.0
+
+
+def compute_semantic_match_details(candidate_profile: Dict[str, object], material_profile: Dict[str, object]) -> Dict[str, float]:
     token_score = weighted_jaccard(
         candidate_profile.get("token_weights", {}),
         material_profile.get("token_weights", {}),
     )
-    candidate_type = candidate_profile.get("semantic_type", "generic")
-    material_type = material_profile.get("semantic_type", "generic")
+    candidate_type = str(candidate_profile.get("semantic_type", "generic"))
+    material_type = str(material_profile.get("semantic_type", "generic"))
     candidate_anchor = SEMANTIC_ANCHORS.get(candidate_type, SEMANTIC_ANCHORS["generic"])
     material_tokens = material_profile.get("token_weights", {})
     anchor_score = 1.0 if candidate_anchor in material_tokens else 0.0
-    type_bonus = 0.0
-    if candidate_type == material_type:
-        type_bonus = 0.18
-    elif candidate_type in ("symptom", "product") and material_type in ("symptom", "product"):
-        type_bonus = -0.22
-    else:
-        type_bonus = 0.0
+    type_alignment = 1.0 if candidate_type == material_type else (0.12 if "generic" in (candidate_type, material_type) else 0.0)
+    intent_score = _exact_or_prefix_score(
+        str(candidate_profile.get("intent", "")),
+        str(material_profile.get("intent", "")),
+        fallback=0.2 if candidate_type == material_type else 0.0,
+        generic_score=0.45,
+    )
+    entity_score = _entity_overlap_score(
+        candidate_profile.get("entities", []) or [],
+        material_profile.get("entities", []) or [],
+    )
+    action_score = _exact_or_prefix_score(
+        str(candidate_profile.get("action_type", GENERIC_ACTION)),
+        str(material_profile.get("action_type", GENERIC_ACTION)),
+        fallback=0.15 if candidate_type == material_type else 0.0,
+        generic_score=0.5,
+    )
+    scene_score = _exact_or_prefix_score(
+        str(candidate_profile.get("scene_hint", GENERIC_SCENE)),
+        str(material_profile.get("scene_hint", GENERIC_SCENE)),
+        fallback=0.2,
+        generic_score=0.52,
+    )
+    context_score = max(0.0, min(1.0, (token_score * 0.65) + (anchor_score * 0.2) + (type_alignment * 0.15)))
+    visual_quality = max(0.0, min(1.0, float(material_profile.get("visual_quality", 0.75))))
+    generic_penalty = 0.08 if material_profile.get("is_generic") else 0.0
+    motion_penalty = 0.04 if (
+        candidate_profile.get("intent") == "product_effect"
+        and str(material_profile.get("motion_level", "medium")) == "low"
+    ) else 0.0
+    final_score = (
+        intent_score * 0.35
+        + entity_score * 0.25
+        + action_score * 0.15
+        + scene_score * 0.10
+        + context_score * 0.10
+        + visual_quality * 0.05
+        + type_alignment * 0.06
+        + anchor_score * 0.04
+        - generic_penalty
+        - motion_penalty
+    )
+    final_score = max(0.0, min(1.0, round(final_score, 4)))
+    return {
+        "intent": round(intent_score, 4),
+        "entity": round(entity_score, 4),
+        "action": round(action_score, 4),
+        "scene": round(scene_score, 4),
+        "context": round(context_score, 4),
+        "visual_quality": round(visual_quality, 4),
+        "type_alignment": round(type_alignment, 4),
+        "anchor": round(anchor_score, 4),
+        "generic_penalty": round(generic_penalty, 4),
+        "motion_penalty": round(motion_penalty, 4),
+        "token_overlap": round(token_score, 4),
+        "final_score": final_score,
+    }
 
-    emotion_bonus = 0.04 if candidate_profile.get("emotion_strength") == material_profile.get("emotion_strength") else 0.0
-    generic_penalty = 0.05 if material_profile.get("is_generic") else 0.0
-    score = (anchor_score * 0.55) + (token_score * 0.25) + type_bonus + emotion_bonus - generic_penalty
-    return max(0.0, min(1.0, round(score, 4)))
+
+def compute_semantic_similarity(candidate_profile: Dict[str, object], material_profile: Dict[str, object]) -> float:
+    return compute_semantic_match_details(candidate_profile, material_profile)["final_score"]
 
 
 def is_generic_material(material: Dict[str, object]) -> bool:
@@ -231,15 +536,24 @@ def build_material_semantic_library(videos: Sequence[Dict[str, object]], emergen
         semantic_type = _resolve_material_semantic_type(video)
         generic = is_generic_material(video)
         enriched = dict(video)
-        enriched["semantic_type"] = semantic_type
-        enriched["is_emergency_generic"] = generic
-        enriched["semantic_profile"] = build_semantic_profile(
+        semantic_profile = build_semantic_profile(
             text=combined_text,
             semantic_type=semantic_type,
             tags=video.get("tags", []) or [],
             emotion_strength=str(video.get("emotion_strength", "medium")),
             is_generic=generic,
+            visual_quality=_build_quality_score(video, video.get("tags", []) or []),
         )
+        enriched["semantic_type"] = semantic_type
+        enriched["is_emergency_generic"] = generic
+        enriched["semantic_profile"] = semantic_profile
+        enriched["intent"] = semantic_profile.get("intent", "")
+        enriched["action_type"] = semantic_profile.get("action_type", "")
+        enriched["scene_hint"] = semantic_profile.get("scene_hint", "")
+        enriched["entities"] = semantic_profile.get("entities", [])
+        enriched["camera_shot"] = semantic_profile.get("camera_shot", "medium")
+        enriched["motion_level"] = semantic_profile.get("motion_level", "medium")
+        enriched["visual_quality"] = semantic_profile.get("visual_quality", 0.75)
         materials.append(enriched)
         if generic:
             generic_materials.append(enriched)
@@ -251,15 +565,21 @@ def build_material_semantic_library(videos: Sequence[Dict[str, object]], emergen
     return {"materials": materials, "emergency_pool": emergency_pool}
 
 
-def rank_materials_by_semantics(candidate: Dict[str, object], materials: Sequence[Dict[str, object]]) -> List[Tuple[float, Dict[str, object]]]:
-    candidate_profile = build_semantic_profile(
+def rank_materials_by_semantics(candidate: Dict[str, object], materials: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+    candidate_profile = candidate.get("semantic_profile") or build_segment_semantic_script(
         text=str(candidate.get("text", "")),
         semantic_type=str(candidate.get("semantic_type", "")),
-        tags=[],
+        tags=candidate.get("tags", []) or [],
         emotion_strength=str(candidate.get("emotion_strength", "medium")),
-        is_generic=False,
+        context_prev=str(candidate.get("context_prev", "")),
+        context_next=str(candidate.get("context_next", "")),
+        trigger_reason=str(candidate.get("trigger_reason", "semantic")),
+        intent=str(candidate.get("intent", "")),
+        action_type=str(candidate.get("action_type", "")),
+        scene_hint=str(candidate.get("scene_hint", "")),
+        entities=candidate.get("entities", []) or [],
     )
-    ranked: List[Tuple[float, Dict[str, object]]] = []
+    ranked: List[Dict[str, object]] = []
     for material in materials:
         material_profile = material.get("semantic_profile") or build_semantic_profile(
             text=str(material.get("filename", "")),
@@ -267,10 +587,19 @@ def rank_materials_by_semantics(candidate: Dict[str, object], materials: Sequenc
             tags=material.get("tags", []) or [],
             emotion_strength=str(material.get("emotion_strength", "medium")),
             is_generic=bool(material.get("is_emergency_generic")),
+            visual_quality=float(material.get("visual_quality", 0.75)),
         )
-        score = compute_semantic_similarity(candidate_profile, material_profile)
-        ranked.append((score, material))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+        details = compute_semantic_match_details(candidate_profile, material_profile)
+        ranked.append(
+            {
+                "score": details["final_score"],
+                "material": material,
+                "score_breakdown": details,
+                "candidate_profile": candidate_profile,
+                "material_profile": material_profile,
+            }
+        )
+    ranked.sort(key=lambda item: item["score"], reverse=True)
     return ranked
 
 
@@ -289,7 +618,7 @@ class BrollUsageHistory:
             with open(self.history_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             self.entries = list(payload.get("entries", []))
-        except Exception:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, ValueError):
             self.entries = []
         self.prune()
 
@@ -301,7 +630,7 @@ class BrollUsageHistory:
         for entry in self.entries:
             try:
                 used_at = datetime.fromisoformat(str(entry.get("used_at")))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             if used_at >= cutoff:
                 kept.append(entry)

@@ -75,8 +75,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Copy-Item (Join-Path $ProjectRoot "RELEASE_GUIDE.md") (Join-Path $ReleaseDir "RELEASE_GUIDE.md") -Force
-Copy-Item (Join-Path $ProjectRoot "发布使用说明.md") (Join-Path $ReleaseDir "发布使用说明.md") -Force
-Copy-Item (Join-Path $ProjectRoot "环境配置说明.md") (Join-Path $ReleaseDir "环境配置说明.md") -Force
+$ChineseDocs = @(
+    @{ Pattern = "*使用说明*.md"; PreferredName = "发布使用说明.md" },
+    @{ Pattern = "*环境配置说明*.md"; PreferredName = "环境配置说明.md" }
+)
+foreach ($doc in $ChineseDocs) {
+    $match = Get-ChildItem -Path $ProjectRoot -File | Where-Object { $_.Name -like $doc.Pattern } | Select-Object -First 1
+    if ($match) {
+        Copy-Item $match.FullName (Join-Path $ReleaseDir $doc.PreferredName) -Force
+    }
+}
 Copy-Item (Join-Path $ProjectRoot ".env.example") (Join-Path $ReleaseDir ".env.example") -Force
 Copy-Item (Join-Path $ProjectRoot "requirements.txt") (Join-Path $ReleaseDir "requirements.txt") -Force
 Copy-Item (Join-Path $ProjectRoot "requirements-dev.txt") (Join-Path $ReleaseDir "requirements-dev.txt") -Force

@@ -597,57 +597,55 @@ def plan_insertions_with_keywords(
 
     b_rolls = []
     last_type = None
+    last_end = -999.0
+    symptom_keywords = [
+        "发痒", "痒", "抓挠", "红肿", "皮损", "脱皮", "起皮",
+    ] + list(SEMANTIC_KEYWORDS["symptom"])
+    product_keywords = [
+        "药膏", "乳膏", "软膏", "凝胶", "喷剂", "喷雾", "搽剂", "药盒", "外盒",
+        "药品", "这款药", "这个药", "本品", "药",
+    ] + list(SEMANTIC_KEYWORDS["product"])
 
     for seg in transcript_segments:
         text = str(seg.get("text", "")).lower()
         if not text:
             continue
 
-        symptom_hits = sum(1 for kw in SEMANTIC_KEYWORDS["symptom"] if kw in text)
-        product_hits = sum(1 for kw in SEMANTIC_KEYWORDS["product"] if kw in text)
+        symptom_hit_words = [kw for kw in symptom_keywords if kw in text]
+        product_hit_words = [kw for kw in product_keywords if kw in text]
+        symptom_hits = len(symptom_hit_words)
+        product_hits = len(product_hit_words)
 
         seg_type = None
+        trigger_keyword = None
         if symptom_hits > product_hits and symptom_hits > 0:
             seg_type = "symptom"
+            trigger_keyword = symptom_hit_words[0]
         elif product_hits > symptom_hits and product_hits > 0:
             seg_type = "product"
+            trigger_keyword = product_hit_words[0]
 
-        if seg_type and seg_type != last_type:
+        if seg_type:
             seg_start = float(seg.get("start", 0))
             seg_end = float(seg.get("end", 0))
             seg_dur = seg_end - seg_start
+            if seg_type == last_type and (seg_start - last_end) < 1.2:
+                continue
 
-            if seg_dur >= insert_min:
+            if seg_dur >= 0.8:
                 insert_dur = min(seg_dur, insert_max)
                 insert_start = seg_start + (seg_dur - insert_dur) / 2
                 b_rolls.append({
                     "start": round(insert_start, 1),
                     "end": round(insert_start + insert_dur, 1),
                     "type": seg_type,
-                    "reason": f"关键词命中: {text[:40]}"
+                    "reason": f"关键词命中: {trigger_keyword or text[:20]}",
+                    "keyword": trigger_keyword or "",
                 })
-            last_type = seg_type
-
-    target_count = max(4, int(video_duration / 15))
-    if len(b_rolls) < target_count:
-        existing_starts = {float(b["start"]) for b in b_rolls}
-        step = video_duration / (target_count + 1) if target_count > 0 else 10.0
-        for i in range(target_count):
-            start = step * (i + 1)
-            too_close = any(abs(start - es) < 3.0 for es in existing_starts)
-            if too_close:
-                continue
-            b_rolls.append({
-                "start": round(start, 1),
-                "end": round(start + insert_min, 1),
-                "type": "symptom" if i % 2 == 0 else "product",
-                "reason": "密度补充"
-            })
-            existing_starts.add(start)
+                last_type = seg_type
+                last_end = float(insert_start + insert_dur)
 
     b_rolls.sort(key=lambda b: b["start"])
-    if len(b_rolls) > target_count * 2:
-        b_rolls = b_rolls[:target_count * 2]
 
     for b in b_rolls:
         b["start"] = max(0.0, min(video_duration - 0.5, float(b.get("start", 0))))

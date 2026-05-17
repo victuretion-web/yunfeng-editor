@@ -49,5 +49,6 @@ This release uses the Windows `PyInstaller one-folder` portable packaging mode.
 
 - Do not move files out of `_internal/`
 - Do not distribute only the single exe file
-- API Key is no longer hardcoded; enter it once in the UI and it will be saved locally in `output/ui_settings.json`
+- API Key is no longer hardcoded; enter it once in the UI and it will be stored securely using the current Windows user profile
+- Non-sensitive settings such as paths and model name are still saved in `output/ui_settings.json`
 - If repackaging is needed, run `build_release.ps1`

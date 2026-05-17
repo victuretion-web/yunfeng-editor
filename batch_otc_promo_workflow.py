@@ -14,21 +14,44 @@ from batch_runtime_config import get_batch_concurrency
 from draft_registry import get_draft_root
 from material_pool_rules import validate_material_pools, write_material_pool_report
 
-# 导入主工作流模块
-from otc_promo_workflow import (
-    collect_video_files,
-    smart_material_matching,
-    create_otc_promo_video,
-    SPEECH_DIR,
-    PRODUCT_DIR,
-    SYMPTOM_DIR,
-    UsageTracker,
-    AD_FREQ_LIMIT,
-    STICKER_FREQ_LIMIT,
-    BROLL_FREQ_LIMIT,
-    MATERIAL_POOL_REPORT_PATH,
-    OUTPUT_DIR,
-)
+try:
+    # 主工作流依赖较重，允许状态相关工具在缺少多媒体依赖时仍可导入。
+    from otc_promo_workflow import (
+        collect_video_files,
+        smart_material_matching,
+        create_otc_promo_video,
+        SPEECH_DIR,
+        PRODUCT_DIR,
+        SYMPTOM_DIR,
+        UsageTracker,
+        AD_FREQ_LIMIT,
+        STICKER_FREQ_LIMIT,
+        BROLL_FREQ_LIMIT,
+        MATERIAL_POOL_REPORT_PATH,
+        OUTPUT_DIR,
+    )
+    _WORKFLOW_IMPORT_ERROR = None
+except Exception as exc:
+    collect_video_files = None
+    smart_material_matching = None
+    create_otc_promo_video = None
+    SPEECH_DIR = ""
+    PRODUCT_DIR = ""
+    SYMPTOM_DIR = ""
+    UsageTracker = None
+    AD_FREQ_LIMIT = 0
+    STICKER_FREQ_LIMIT = 0
+    BROLL_FREQ_LIMIT = 0
+    MATERIAL_POOL_REPORT_PATH = ""
+    OUTPUT_DIR = ""
+    _WORKFLOW_IMPORT_ERROR = exc
+
+
+def _ensure_workflow_ready():
+    if _WORKFLOW_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "otc_promo_workflow 依赖未就绪，请先安装多媒体和剪映相关依赖后再运行批处理。"
+        ) from _WORKFLOW_IMPORT_ERROR
 
 
 def _default_batch_state():
@@ -103,6 +126,7 @@ def _build_batch_summary(results_by_video, selected_total, skipped_success):
 
 
 def _process_single_speech_video(speech_video, product_videos, symptom_videos, sensitivity, output_dir, draft_root, batch_tracker=None):
+    _ensure_workflow_ready()
     result = {
         'video': speech_video['filename'],
         'project': f"OTC推广_{os.path.splitext(speech_video['filename'])[0]}",
@@ -145,7 +169,7 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
             sfx_list=sfx_list,
             bgm_emotion=bgm_emotion,
             tracker=tracker,
-            is_review_version=True
+            is_review_version=False,
         )
         result['status'] = '成功' if success else '失败'
         if not success:
@@ -161,6 +185,7 @@ def _process_single_speech_video(speech_video, product_videos, symptom_videos, s
 
 def batch_process_otc_videos(sensitivity='high', limit=0, resume=False, retry_failed_only=False):
     """批量处理所有口播视频"""
+    _ensure_workflow_ready()
     configure_current_process()
     batch_concurrency = get_batch_concurrency()
     print("=" * 80)

@@ -1,6 +1,7 @@
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -89,7 +90,7 @@ def _load_json(path: str) -> Optional[Dict]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
@@ -126,6 +127,26 @@ def _infer_explicit_tags(video_path: str) -> List[str]:
     return tags[:6]
 
 
+_TEMP_COPIED_FILES: List[str] = []
+
+
+def _cleanup_stale_temp_copies(max_age_hours: int = 24) -> int:
+    safe_root = os.path.join(tempfile.gettempdir(), "yunfeng_cv2_data")
+    if not os.path.isdir(safe_root):
+        return 0
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    for name in os.listdir(safe_root):
+        filepath = os.path.join(safe_root, name)
+        try:
+            if os.path.isfile(filepath) and os.path.getmtime(filepath) < cutoff:
+                os.remove(filepath)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _resolve_opencv_readable_path(path: str) -> str:
     if not path or not os.path.exists(path):
         return path
@@ -145,8 +166,8 @@ def _resolve_opencv_readable_path(path: str) -> str:
                     return short_path
                 except UnicodeEncodeError:
                     pass
-    except Exception:
-        pass
+    except (AttributeError, OSError) as exc:
+        print(f"   [WARN] 获取短路径失败，将尝试复制到临时目录: {os.path.basename(path)} ({exc})")
     safe_root = os.path.join(tempfile.gettempdir(), "yunfeng_cv2_data")
     os.makedirs(safe_root, exist_ok=True)
     safe_path = os.path.join(safe_root, os.path.basename(path))
@@ -154,10 +175,18 @@ def _resolve_opencv_readable_path(path: str) -> str:
         src_stat = os.stat(path)
         dst_stat = os.stat(safe_path) if os.path.exists(safe_path) else None
         if dst_stat is None or dst_stat.st_size != src_stat.st_size:
+            file_size_mb = src_stat.st_size / (1024 * 1024)
+            if file_size_mb > 100:
+                print(f"   [WARN] 视频路径含非 ASCII 字符，正在复制大文件到临时目录 ({file_size_mb:.0f} MB): {os.path.basename(path)}")
             shutil.copy2(path, safe_path)
+            _TEMP_COPIED_FILES.append(safe_path)
+        # 每次经过此路径时顺便清理超过 24 小时的旧临时文件。
+        _cleanup_stale_temp_copies(max_age_hours=24)
         return safe_path
-    except Exception:
-        return path
+    except OSError as exc:
+        raise RuntimeError(
+            f"复制 OpenCV 兼容路径失败，无法继续使用非 ASCII 路径: {os.path.basename(path)} ({exc})"
+        ) from exc
 
 
 def _get_face_cascade():
@@ -174,7 +203,8 @@ def _get_face_cascade():
         else:
             _FACE_CASCADE = detector
             _FACE_CASCADE_PATH = cascade_path
-    except Exception:
+    except (AttributeError, OSError, RuntimeError, cv2.error) as exc:
+        print(f"   [WARN] 人脸检测器初始化失败: {exc}")
         _FACE_CASCADE = None
         _FACE_CASCADE_PATH = None
     return _FACE_CASCADE
@@ -206,7 +236,7 @@ def _estimate_face_metrics(gray_frame) -> Dict[str, float]:
             minNeighbors=4,
             minSize=(36, 36),
         )
-    except Exception:
+    except cv2.error:
         faces = ()
     if len(faces) == 0:
         return {"face_count": 0.0, "face_area_ratio": 0.0}
@@ -569,6 +599,16 @@ def _detect_shot_boundaries(
     return boundaries
 
 
+def _safe_video_fps(raw_fps: object, default: float = 25.0) -> float:
+    try:
+        fps = float(raw_fps)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(fps) or fps <= 0:
+        return default
+    return fps
+
+
 def analyze_video_shots(
     video_path: str,
     *,
@@ -600,7 +640,7 @@ def analyze_video_shots(
     if not cap.isOpened():
         raise RuntimeError(f"视频无法打开: {video_path}")
 
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    fps = _safe_video_fps(cap.get(cv2.CAP_PROP_FPS), default=25.0)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration_seconds = frame_count / fps if fps > 0 else 0.0
     cap.release()

@@ -27,9 +27,9 @@ class JyProjectBase:
         self.root = os.path.abspath(drafts_root or get_default_drafts_root())
         if not os.path.exists(self.root):
             try:
-                os.makedirs(self.root)
-            except Exception:
-                pass
+                os.makedirs(self.root, exist_ok=True)
+            except OSError as exc:
+                raise RuntimeError(f"创建剪映草稿根目录失败: {self.root}") from exc
 
         print(f"Project Root: {self.root}")
 
@@ -128,8 +128,10 @@ class JyProjectBase:
                     ctl.app.SendKeys("{Esc}")
                     time.sleep(1)
                     ctl.get_window(topmost=False)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(f"[warn] failed to dismiss pre-export dialog: {exc}")
+                    ctl.release_topmost()
+                    return False
                 status = getattr(ctl, "app_status", "")
 
             if status == "edit":

@@ -27,11 +27,7 @@ def material_similarity_score(left: Dict, right: Dict) -> float:
 
 
 def are_materials_similar(left: Dict, right: Dict, threshold: float = SIMILARITY_THRESHOLD) -> bool:
-    left_filename = os.path.basename(str(left.get("filename") or left.get("path", "")))
-    right_filename = os.path.basename(str(right.get("filename") or right.get("path", "")))
-    if left_filename and right_filename and left_filename != right_filename:
-        return False
-
+    # 优先检查内容层面的身份标识，防止改名后的相同素材被误判为不同素材。
     left_uid = left.get("unique_id")
     right_uid = right.get("unique_id")
     if left_uid and right_uid and left_uid == right_uid:
@@ -45,6 +41,12 @@ def are_materials_similar(left: Dict, right: Dict, threshold: float = SIMILARITY
     left_path = os.path.normcase(os.path.abspath(left.get("path", "")))
     right_path = os.path.normcase(os.path.abspath(right.get("path", "")))
     if left_path and left_path == right_path:
+        return True
+
+    # 文件名 + 元数据相似度兜底判断。
+    left_filename = os.path.basename(str(left.get("filename") or left.get("path", "")))
+    right_filename = os.path.basename(str(right.get("filename") or right.get("path", "")))
+    if left_filename and right_filename and left_filename == right_filename:
         return True
 
     duration_gap = abs(float(left.get("duration", 0.0)) - float(right.get("duration", 0.0)))

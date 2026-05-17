@@ -29,14 +29,21 @@ ffmpeg_root = resolve_path(
     project_root / "ffmpeg-8.1-essentials_build",
     "ffmpeg root",
 )
+cv2_haarcascade_root = Path(resolve_path(
+    "OTC_RELEASE_CV2_HAARCASCADE_ROOT",
+    Path(os.path.dirname(__import__("cv2").data.haarcascades)),
+    "cv2 haarcascade root",
+))
 datas = [
     (str(skill_root), "jianying-editor-skill-main/jianying-editor-skill-main"),
     (str(ffmpeg_root), "ffmpeg-8.1-essentials_build"),
+    (str(cv2_haarcascade_root), "cv2/data"),
 ]
 
 
 datas += collect_data_files("tiktoken")
 datas += collect_data_files("imageio")
+datas += collect_data_files("whisper")
 
 hiddenimports = [
     "llm_clip_matcher",

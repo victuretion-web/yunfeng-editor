@@ -8,9 +8,8 @@ WORKFLOW_PATH = PROJECT_ROOT / "otc_promo_workflow.py"
 
 
 class OtcReviewLayerSourceTests(unittest.TestCase):
-    def test_review_only_overlay_tracks_stay_under_review_flag(self):
-        """Watermark track should still be under is_review_version guard,
-        but ad_review and sticker tracks should be unconditional."""
+    def test_single_output_keeps_only_watermark_under_review_flag(self):
+        """Single-output flow should still keep the review watermark behind the review flag."""
         source = WORKFLOW_PATH.read_text(encoding="utf-8")
         module = ast.parse(source)
         target_function = next(
@@ -24,43 +23,37 @@ class OtcReviewLayerSourceTests(unittest.TestCase):
 
         self.assertTrue(guarded_ranges)
 
-        # Watermark track should still be guarded by is_review_version
-        watermark_nodes = []
-        for node in ast.walk(target_function):
-            if isinstance(node, ast.Constant) and node.value in {"07_Review_Watermark"}:
-                watermark_nodes.append(node)
+        guarded_blocks = [
+            ast.get_source_segment(source, node) or ""
+            for node in ast.walk(target_function)
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "is_review_version"
+        ]
 
-        self.assertTrue(watermark_nodes)
-        for node in watermark_nodes:
-            self.assertTrue(
-                any(start <= node.lineno <= end for start, end in guarded_ranges),
-                msg=f"{node.value} should stay inside the is_review_version guard",
-            )
+        self.assertTrue(guarded_blocks)
+        combined = "\n".join(guarded_blocks)
+        self.assertIn("07_Review_Watermark", combined)
+        self.assertIn('draft.TrackType.text, "07_Review_Watermark"', combined)
+        self.assertNotIn("05_Ad_Review", combined)
+        self.assertNotIn("06_Top_Sticker", combined)
 
-    def test_ad_review_and_sticker_tracks_are_unconditional(self):
-        """Ad review and sticker tracks should NOT be under is_review_version guard."""
+        self.assertIn('project.script.add_track(draft.TrackType.video, "05_Ad_Review"', source)
+        self.assertIn('project.script.add_track(draft.TrackType.video, "06_Top_Sticker"', source)
+
+    def test_main_flow_exports_single_stable_draft(self):
+        """The worker entry should output one stable draft instead of dual variants."""
         source = WORKFLOW_PATH.read_text(encoding="utf-8")
         module = ast.parse(source)
-        target_function = next(
-            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "create_otc_promo_video"
+        main_function = next(
+            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "main"
         )
 
-        guarded_ranges = []
-        for node in ast.walk(target_function):
-            if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "is_review_version":
-                guarded_ranges.append((node.lineno, getattr(node, "end_lineno", node.lineno)))
+        helper_calls = []
+        for node in ast.walk(main_function):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                helper_calls.append(node.func.id)
 
-        review_track_nodes = []
-        for node in ast.walk(target_function):
-            if isinstance(node, ast.Constant) and node.value in {"05_Ad_Review", "06_Top_Sticker"}:
-                review_track_nodes.append(node)
-
-        self.assertTrue(review_track_nodes)
-        for node in review_track_nodes:
-            self.assertFalse(
-                any(start <= node.lineno <= end for start, end in guarded_ranges),
-                msg=f"{node.value} should NOT be inside the is_review_version guard (should be unconditional)",
-            )
+        self.assertIn("create_otc_promo_video", helper_calls)
+        self.assertNotIn("create_otc_promo_video_variants", helper_calls)
 
 
 if __name__ == "__main__":

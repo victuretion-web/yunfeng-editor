@@ -276,6 +276,15 @@ def auto_fill_density_gaps(
             if not inserted:
                 break
 
+    if target_ratio > 0 and video_duration > 0:
+        total_insert = sum(
+            float(item.get("end_time", 0.0)) - float(item.get("start_time", 0.0))
+            for item in merged
+        )
+        final_ratio = total_insert / video_duration
+        if final_ratio < target_ratio - 0.03:
+            print(f"   [!] 密度补齐：目标覆盖率 {target_ratio:.0%}，实际 {final_ratio:.1%}，已尽力补齐。")
+
     merged.sort(key=lambda item: float(item.get("start_time", 0.0)))
     final_windows = analyze_insert_density(
         merged,

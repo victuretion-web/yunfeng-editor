@@ -2,8 +2,19 @@ import os
 from typing import Dict, Tuple
 
 import numpy as np
-import pyaudioop  # Ensure PyInstaller collects the Python 3.13 audioop shim.
-from pydub import AudioSegment
+
+try:
+    import pyaudioop  # Ensure PyInstaller collects the Python 3.13 audioop shim.
+except ImportError:
+    pyaudioop = None
+
+try:
+    from pydub import AudioSegment
+except ImportError:
+    class AudioSegment:  # type: ignore[no-redef]
+        @staticmethod
+        def from_file(_path: str):
+            raise RuntimeError("pydub 未安装，无法处理背景音乐")
 
 from subprocess_windows import run_hidden
 
@@ -36,7 +47,7 @@ def _compute_phase_report(audio: AudioSegment) -> Dict[str, object]:
     return {"checked": True, "correlation": round(correlation, 4), "status": status}
 
 
-def _normalize_loudness(input_path: str, output_path: str, target_lufs: int) -> bool:
+def _normalize_loudness(input_path: str, output_path: str, target_lufs: int) -> Tuple[bool, str]:
     result = run_hidden(
         [
             "ffmpeg",
@@ -52,7 +63,16 @@ def _normalize_loudness(input_path: str, output_path: str, target_lufs: int) -> 
         encoding="utf-8",
         errors="ignore",
     )
-    return result.returncode == 0 and os.path.exists(output_path)
+    stderr_text = str(result.stderr or "").strip()
+    if result.returncode != 0:
+        message = stderr_text[-400:] if stderr_text else f"ffmpeg 返回码 {result.returncode}"
+        return False, f"loudnorm 执行失败: {message}"
+    if not os.path.exists(output_path):
+        return False, "loudnorm 未生成输出文件"
+    lowered = stderr_text.lower()
+    if "error" in lowered or "failed" in lowered or "invalid" in lowered:
+        return False, f"loudnorm 输出包含异常: {stderr_text[-400:]}"
+    return True, ""
 
 
 def prepare_bgm_for_timeline(
@@ -65,7 +85,10 @@ def prepare_bgm_for_timeline(
     normalize_lufs: bool = True,
     phase_check: bool = True,
 ) -> Tuple[str, Dict[str, object]]:
-    audio = AudioSegment.from_file(bgm_path)
+    try:
+        audio = AudioSegment.from_file(bgm_path)
+    except Exception as exc:
+        raise RuntimeError(f"背景音乐读取失败: {os.path.basename(bgm_path)} ({exc})") from exc
     audio = audio.set_channels(2).set_frame_rate(48000)
     target_ms = max(100, int(round(float(target_duration_sec) * 1000)))
 
@@ -84,12 +107,17 @@ def prepare_bgm_for_timeline(
 
     os.makedirs(output_dir, exist_ok=True)
     rendered_path = os.path.join(output_dir, f"{prefix}_bgm_prepared.wav")
-    processed.export(rendered_path, format="wav")
+    try:
+        processed.export(rendered_path, format="wav")
+    except Exception as exc:
+        raise RuntimeError(f"背景音乐导出失败: {os.path.basename(rendered_path)} ({exc})") from exc
 
     final_path = rendered_path
+    normalization_warning = ""
     if normalize_lufs:
         normalized_path = os.path.join(output_dir, f"{prefix}_bgm_lufs.wav")
-        if _normalize_loudness(rendered_path, normalized_path, target_lufs=target_lufs):
+        normalized_ok, normalization_warning = _normalize_loudness(rendered_path, normalized_path, target_lufs=target_lufs)
+        if normalized_ok:
             final_path = normalized_path
 
     report = {
@@ -101,6 +129,7 @@ def prepare_bgm_for_timeline(
         "crossfade_ms": int(crossfade_ms),
         "target_lufs": int(target_lufs),
         "normalized": bool(normalize_lufs),
+        "normalization_warning": normalization_warning,
         "phase_report": phase_report,
     }
     return final_path, report
