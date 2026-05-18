@@ -562,6 +562,81 @@ def sync_managed_drafts(
     return report
 
 
+def delete_drafts_permanently(
+    draft_root: str,
+    draft_names: Tuple[str, ...],
+    project_prefixes: Tuple[str, ...] = ("OTC推广_",),
+    remove_from_recycle: bool = True,
+    report_path: Optional[str] = None,
+    lock_path: Optional[str] = None,
+) -> Dict:
+    draft_root = os.path.abspath(draft_root)
+    os.makedirs(draft_root, exist_ok=True)
+    project_prefixes = _normalize_project_prefixes(project_prefixes)
+    names = tuple(
+        sorted(
+            {
+                str(name or "").strip()
+                for name in (draft_names or ())
+                if str(name or "").strip()
+                and _matches_project_prefix(str(name or "").strip(), project_prefixes)
+            }
+        )
+    )
+    lock_path = lock_path or os.path.join(draft_root, ".draft_delete.lock")
+    report = {
+        "draft_root": draft_root,
+        "requested_names": list(names),
+        "removed_active": [],
+        "removed_from_recycle": [],
+        "missing": [],
+        "registered_drafts": [],
+        "written_at": int(time.time()),
+    }
+    if not names:
+        if report_path:
+            os.makedirs(os.path.dirname(report_path), exist_ok=True)
+            _atomic_write_json(report_path, report)
+        return report
+
+    with file_lock(lock_path, timeout=180.0):
+        for name in names:
+            removed_any = False
+            target_path = os.path.join(draft_root, name)
+            if os.path.isdir(target_path):
+                shutil.rmtree(target_path, ignore_errors=False)
+                report["removed_active"].append(name)
+                removed_any = True
+            if remove_from_recycle:
+                for source_kind, source_root in _iter_recycle_sources(draft_root):
+                    source_path = os.path.join(source_root, name)
+                    if not os.path.isdir(source_path):
+                        continue
+                    shutil.rmtree(source_path, ignore_errors=False)
+                    report["removed_from_recycle"].append({
+                        "source": source_kind,
+                        "name": name,
+                    })
+                    removed_any = True
+            if not removed_any:
+                report["missing"].append(name)
+
+    reconcile_report = reconcile_root_meta(
+        draft_root=draft_root,
+        restore_project_drafts=False,
+        project_prefixes=project_prefixes,
+        report_path=None,
+        lock_path=os.path.join(draft_root, ".root_meta_info.lock"),
+    )
+    report["registered_drafts"] = list(reconcile_report.get("registered_drafts", []))
+
+    if report_path:
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        _atomic_write_json(report_path, report)
+
+    return report
+
+
 def reconcile_root_meta(
     draft_root: Optional[str] = None,
     restore_project_drafts: bool = False,

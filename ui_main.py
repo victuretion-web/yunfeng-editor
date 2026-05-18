@@ -22,6 +22,7 @@ from draft_registry import (
     DRAFT_MODE_AUTO,
     DRAFT_MODE_PORTABLE,
     DRAFT_MODE_SYSTEM,
+    delete_drafts_permanently,
     get_official_draft_root,
     get_draft_root,
     get_draft_root_info,
@@ -106,6 +107,7 @@ class YunFengEditorUI(tk.Tk):
         self._task_hit_all_rows = []
         self._task_preview_image = None
         self._last_task_runtime_log_text = None
+        self._last_selected_task_id = ""
         self.var_task_hits_only_shot = tk.BooleanVar(value=False)
         self.var_task_hits_need_review = tk.BooleanVar(value=False)
         self._analysis_summary_cache = {}
@@ -901,7 +903,7 @@ class YunFengEditorUI(tk.Tk):
         try:
             return reconcile_root_meta(
                 draft_root=draft_root,
-                restore_project_drafts=True,
+                restore_project_drafts=False,
                 project_prefixes=("OTC推广_",),
                 include_names=keep_names,
                 remove_stale_managed=False,
@@ -1691,6 +1693,36 @@ class YunFengEditorUI(tk.Tk):
             if self.tree.item(task_id, 'tags') != expected:
                 self.tree.item(task_id, tags=expected)
 
+    def _is_task_board_visible(self):
+        if not hasattr(self, "notebook") or not hasattr(self, "tab_tasks"):
+            return True
+        try:
+            return self.notebook.select() == str(self.tab_tasks)
+        except Exception:
+            return True
+
+    def _get_selected_task_ids(self):
+        if not hasattr(self, "tree"):
+            return []
+        return [task_id for task_id in self.tree.selection() if self.tree.exists(task_id)]
+
+    def _update_task_selection_actions(self):
+        if not hasattr(self, "tree"):
+            return
+        has_rows = bool(self.tree.get_children())
+        selected_ids = self._get_selected_task_ids()
+        tasks = self._snapshot_running_tasks()
+        has_draft = any(
+            str(tasks.get(task_id, {}).get("draft_dir", "")).strip()
+            for task_id in selected_ids
+        )
+        if hasattr(self, "btn_task_select_all"):
+            self._set_button_state(self.btn_task_select_all, "normal" if has_rows else "disabled")
+        if hasattr(self, "btn_task_select_inverse"):
+            self._set_button_state(self.btn_task_select_inverse, "normal" if has_rows else "disabled")
+        if hasattr(self, "btn_purge_task_drafts"):
+            self._set_button_state(self.btn_purge_task_drafts, "normal" if has_draft else "disabled")
+
     def _update_maintenance_label(self):
         text = (f"维护告警: {self.maintenance_warning_count} | "
                 f"{self.latest_maintenance_warning}")
@@ -2089,7 +2121,7 @@ class YunFengEditorUI(tk.Tk):
         content_pane.add(bottom_frame, weight=4)
 
         columns = ("id", "time", "status", "detail")
-        self.tree = ttk.Treeview(top_frame, columns=columns, show="headings", height=10)
+        self.tree = ttk.Treeview(top_frame, columns=columns, show="headings", height=10, selectmode="extended")
         self.tree.heading("id", text="任务 ID")
         self.tree.column("id", width=80, anchor="center")
         self.tree.heading("time", text="提交时间")
@@ -2222,6 +2254,33 @@ class YunFengEditorUI(tk.Tk):
             state="disabled",
         )
         self.btn_clear_finished.pack(side="left", padx=5)
+
+        self.btn_task_select_all = ttk.Button(
+            control_frame,
+            text="全选任务",
+            style='Secondary.TButton',
+            command=self.select_all_tasks,
+            state="disabled",
+        )
+        self.btn_task_select_all.pack(side="left", padx=5)
+
+        self.btn_task_select_inverse = ttk.Button(
+            control_frame,
+            text="反选任务",
+            style='Secondary.TButton',
+            command=self.invert_task_selection,
+            state="disabled",
+        )
+        self.btn_task_select_inverse.pack(side="left", padx=5)
+
+        self.btn_purge_task_drafts = ttk.Button(
+            control_frame,
+            text="物理清除草稿",
+            style='Secondary.TButton',
+            command=self.purge_selected_task_drafts,
+            state="disabled",
+        )
+        self.btn_purge_task_drafts.pack(side="left", padx=5)
 
     def build_analysis_tab(self):
         frame = self.tab_analysis
@@ -2786,7 +2845,101 @@ class YunFengEditorUI(tk.Tk):
         self._task_hit_rows = {}
         self._clear_task_hit_preview("已清空已结束任务，请重新选择正在运行中的任务查看详情")
         self.on_task_tree_selected()
+        self._update_task_selection_actions()
         messagebox.showinfo("已清空", f"已清空 {len(removable_ids)} 条已结束任务记录。")
+
+    def select_all_tasks(self):
+        if not hasattr(self, "tree"):
+            return
+        children = list(self.tree.get_children())
+        if not children:
+            return
+        self.tree.selection_set(children)
+        self.tree.focus(children[0])
+        self.on_task_tree_selected()
+
+    def invert_task_selection(self):
+        if not hasattr(self, "tree"):
+            return
+        children = list(self.tree.get_children())
+        if not children:
+            return
+        selected = set(self._get_selected_task_ids())
+        inverted = [task_id for task_id in children if task_id not in selected]
+        if inverted:
+            self.tree.selection_set(inverted)
+            self.tree.focus(inverted[0])
+        else:
+            self.tree.selection_remove(children)
+        self.on_task_tree_selected()
+
+    def purge_selected_task_drafts(self):
+        selected_ids = self._get_selected_task_ids()
+        if not selected_ids:
+            messagebox.showinfo("提示", "请先在任务看板里选择要清理草稿的任务。")
+            return
+
+        tasks = self._snapshot_running_tasks()
+        grouped_names = {}
+        skipped = []
+        for task_id in selected_ids:
+            info = tasks.get(task_id, {})
+            draft_dir = str(info.get("draft_dir", "")).strip()
+            draft_name = os.path.basename(draft_dir) if draft_dir else ""
+            draft_root = os.path.dirname(draft_dir) if draft_dir else ""
+            if draft_name.startswith("OTC推广_") and draft_root:
+                grouped_names.setdefault(draft_root, set()).add(draft_name)
+            else:
+                skipped.append(task_id)
+
+        if not grouped_names:
+            messagebox.showinfo("提示", "选中的任务里没有可物理清理的托管草稿。")
+            return
+
+        draft_count = sum(len(names) for names in grouped_names.values())
+        tip = f"将物理删除 {draft_count} 个草稿目录，并同步更新剪映索引。删除后不会自动恢复。"
+        if skipped:
+            tip += f"\n有 {len(skipped)} 条任务当前没有可清理草稿，会自动跳过。"
+        confirmed = messagebox.askyesno("确认物理清除", tip)
+        if not confirmed:
+            return
+
+        report_root = os.path.join(self.output_dir, "draft_purge_reports")
+        os.makedirs(report_root, exist_ok=True)
+        removed_names = set()
+        for draft_root, names in grouped_names.items():
+            root_label = re.sub(r'[<>:"/\\|?*]+', "_", os.path.basename(draft_root) or "draft_root")
+            report_path = os.path.join(
+                report_root,
+                f"purge_{root_label}_{int(time.time())}.json",
+            )
+            delete_drafts_permanently(
+                draft_root=draft_root,
+                draft_names=tuple(sorted(names)),
+                project_prefixes=("OTC推广_",),
+                remove_from_recycle=True,
+                report_path=report_path,
+                lock_path=os.path.join(self.output_dir, ".draft_delete.lock"),
+            )
+            removed_names.update(names)
+
+        with self._tasks_lock:
+            for task_id in selected_ids:
+                info = self.running_tasks.get(task_id)
+                if not info:
+                    continue
+                draft_dir = str(info.get("draft_dir", "")).strip()
+                draft_name = os.path.basename(draft_dir) if draft_dir else ""
+                if draft_name not in removed_names:
+                    continue
+                info["draft_dir"] = ""
+                log_text = str(info.get("log", "")).strip()
+                if "草稿已物理清理" not in log_text:
+                    info["log"] = (log_text + " | 草稿已物理清理").strip(" |")
+        self._write_task_report_snapshot()
+        self.on_task_tree_selected()
+        self._update_task_selection_actions()
+        messagebox.showinfo("已清理", f"已物理清除 {len(removed_names)} 个草稿。后续打开剪映时不会再自动恢复这些草稿。")
 
     def execute_task(self, task_id, env, sensitivity, video_file, retry_count=0):
         max_retries = self.batch_retry_limit
@@ -3100,23 +3253,31 @@ class YunFengEditorUI(tk.Tk):
             self._last_queue_status_text = queue_status_text
 
         self._update_maintenance_label()
+        task_board_visible = self._is_task_board_visible()
 
-        # 定时刷新任务列表的 UI
-        for task_id, info in tasks.items():
-            if self.tree.exists(task_id):
-                item = self.tree.item(task_id)
-                vals = list(item["values"])
-                if vals[2] != info["status"] or vals[3] != info["log"]:
-                    vals[2] = info["status"]
-                    vals[3] = info["log"]
-                    self.tree.item(task_id, values=vals)
-                self._apply_tree_row_tag(task_id, info)
-        if not self.tree.selection():
-            children = self.tree.get_children()
-            if children:
-                self.tree.selection_set(children[0])
-                self.tree.focus(children[0])
-                self.on_task_tree_selected()
+        if task_board_visible:
+            # 仅在任务看板可见时刷新表格和日志，减少后台页签重绘导致的闪烁。
+            for task_id, info in tasks.items():
+                if self.tree.exists(task_id):
+                    item = self.tree.item(task_id)
+                    vals = list(item["values"])
+                    if vals[2] != info["status"] or vals[3] != info["log"]:
+                        vals[2] = info["status"]
+                        vals[3] = info["log"]
+                        self.tree.item(task_id, values=vals)
+                    self._apply_tree_row_tag(task_id, info)
+            selected_ids = self._get_selected_task_ids()
+            if not selected_ids:
+                children = self.tree.get_children()
+                if children:
+                    self.tree.selection_set(children[0])
+                    self.tree.focus(children[0])
+                    self.on_task_tree_selected()
+            else:
+                current_task_id, _ = self._get_selected_task_info()
+                if current_task_id != self._last_selected_task_id:
+                    self._last_selected_task_id = current_task_id
+                    self.on_task_tree_selected()
                     
         # 空闲时应允许继续提交新任务；只有执行中或排队中才禁用提交按钮。
         if active == 0 and waiting == 0:
@@ -3144,7 +3305,9 @@ class YunFengEditorUI(tk.Tk):
             self._set_button_state(self.btn_batch_add, "disabled")
             self._set_button_state(self.btn_clear_finished, "normal" if finished > 0 else "disabled")
 
-        self._refresh_selected_task_runtime_log()
+        if task_board_visible:
+            self._refresh_selected_task_runtime_log()
+        self._update_task_selection_actions()
         self.after(TASK_UI_REFRESH_MS, self.update_task_status_ui)
 
     def cleanup_empty_drafts(self):
@@ -3492,10 +3655,11 @@ class YunFengEditorUI(tk.Tk):
         messagebox.showinfo("完成", "已执行草稿索引修复，并刷新业务分析面板。")
 
     def _get_selected_task_info(self):
-        selection = self.tree.selection()
+        selection = self._get_selected_task_ids()
         if not selection:
             return "", {}
-        task_id = selection[0]
+        focused = self.tree.focus()
+        task_id = focused if focused in selection else selection[0]
         return task_id, self._snapshot_running_tasks().get(task_id, {})
 
     def _refresh_task_artifacts_if_needed(self, task_id, info):
@@ -3725,6 +3889,8 @@ class YunFengEditorUI(tk.Tk):
 
     def on_task_tree_selected(self, _event=None):
         task_id, info = self._get_selected_task_info()
+        self._last_selected_task_id = task_id
+        self._update_task_selection_actions()
         info = self._refresh_task_artifacts_if_needed(task_id, info)
         self._task_hit_rows = {}
         self._task_hit_all_rows = []
